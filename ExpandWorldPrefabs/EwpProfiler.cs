@@ -788,7 +788,7 @@ internal static class EwpProfiler
       Uid = uid; Source = source; Rule = rule; Origin = origin; Trace = trace; Span = span;
       Parent = parent; Delay = delay; TriggerRules = triggerRules; Position = position; Revision = revision; Owner = owner; }
   }
-  private readonly struct RootSpan(long id, long parent, long started, string kind,
+  internal readonly struct RootSpan(long id, long parent, long started, string kind,
     string name, string rule, long inclusive, long exclusive)
   {
     internal long Id { get; } = id;
