@@ -22,6 +22,25 @@ public class YamlParsingTests
   }
 
   [Test]
+  public void MixedYamlSourcesKeepOriginalItemAndPhysicalLinePositions()
+  {
+    const string source =
+      "# heading\n\n" +
+      "- name: first_data\n  value: x\n\n" +
+      "- prefab: Player\n  type: create\n  # trailing comment\n" +
+      "- config: Settings\n  key: value\n\n" +
+      "- valueGroup: second_data\n  values: [x]\n" +
+      "- prefab: Player\n  types: [create, state]\n";
+    Assert.That(Yaml.ParseMixed("mixed.yaml", source, out var entries, out var error), Is.True, error);
+    Assert.That(entries.ScriptEntries, Has.Count.EqualTo(2));
+    Assert.That(entries.ScriptSources, Has.Count.EqualTo(2));
+    Assert.That((entries.ScriptSources[0].YamlItem, entries.ScriptSources[0].StartLine, entries.ScriptSources[0].EndLine),
+      Is.EqualTo((2, 6, 8)));
+    Assert.That((entries.ScriptSources[1].YamlItem, entries.ScriptSources[1].StartLine, entries.ScriptSources[1].EndLine),
+      Is.EqualTo((5, 14, 15)));
+  }
+
+  [Test]
   public void FixedYamlCanBeParsedAfterMixedSyntaxError()
   {
     const string broken = "- prefab: Player\n  type: create\n- name: valid_data\n  value: example\n- config: Custom\n  key: [unclosed\n";

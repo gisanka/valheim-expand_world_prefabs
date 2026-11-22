@@ -79,6 +79,36 @@ public class ProfilerPhaseTests
   }
 
   [Test]
+  public void SourceReportPreservesLoadedVersionAndWarnsAfterReload()
+  {
+    const string identity = "config/expand_world/expand_prefabs.yaml#entry=2|Create|Player|";
+    var original = new EwpProfiler.RuleSource(identity, "expand_world/expand_prefabs.yaml", 2, 5, 42, 48, "hash-A");
+    var modified = new EwpProfiler.RuleSource(identity, "expand_world/expand_prefabs.yaml", 2, 5, 45, 51, "hash-B");
+    EwpProfiler.SetLoadedRuleSources(new[] { original });
+    try
+    {
+      Start("sources");
+      using (EwpProfiler.Begin("rule", identity, identity)) { }
+      EwpProfiler.SetLoadedRuleSources(new[] { modified });
+      using (EwpProfiler.Begin("rule", identity, identity)) { }
+      Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+
+      var sourceRows = File.ReadAllLines(Path.Combine(directory, "sources", "ProfilerRuleSources.tsv"))
+        .Skip(1).Select(line => line.Split('\t')).ToArray();
+      Assert.That(sourceRows.Length, Is.EqualTo(2));
+      Assert.That(sourceRows.Select(row => row[6]), Is.EquivalentTo(new[] { "hash-A", "hash-B" }));
+      Assert.That(sourceRows.Select(row => row[3]), Is.All.EqualTo("5"));
+      Assert.That(sourceRows.Select(row => row[4]), Is.EquivalentTo(new[] { "42", "45" }));
+      var summary = File.ReadAllText(Path.Combine(directory, "sources", "ProfilerSummary.txt"));
+      Assert.That(summary, Does.Contain("Successful rule-source changes during this segment: 1"));
+    }
+    finally
+    {
+      EwpProfiler.SetLoadedRuleSources(Array.Empty<EwpProfiler.RuleSource>());
+    }
+  }
+
+  [Test]
   public void NewCapture_DiscardsPreviousPhaseBuckets_AndIgnoresInactiveScopes()
   {
     Start("first");

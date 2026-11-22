@@ -72,6 +72,26 @@ public class FileLoadingTests
   }
 
   [Test]
+  public void FailedAutomaticReloadRetainsParsedRuleSourceHash()
+  {
+    var path = Path.Combine(FileLoading.BaseDirectory, "expand_prefabs_source.yaml");
+    var valid = new YamlChanges();
+    valid.Changed.Add(Changed(path, "- name: data\n  value: example\n- prefab: Player\n  type: create\n"));
+    FileLoading.StoreChanges(valid, false);
+    var entriesField = typeof(YamlFileCache).GetField("files", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    var stored = (System.Collections.Generic.Dictionary<string, Yaml.MixedFileEntries>)entriesField.GetValue(cache)!;
+    var before = stored[path];
+    Assert.That(before.ContentHash, Is.EqualTo("hash"));
+    Assert.That(before.ScriptSources[0].YamlItem, Is.EqualTo(2));
+    Assert.That(before.ScriptSources[0].StartLine, Is.EqualTo(3));
+
+    var invalid = new YamlChanges();
+    invalid.Changed.Add(Changed(path, "- prefab: Player\n  type: [invalid"));
+    Assert.That(FileLoading.StoreChanges(invalid, false).Modified, Is.Zero);
+    Assert.That(stored[path], Is.SameAs(before));
+  }
+
+  [Test]
   public void DeletedFileIsRemovedFromCache()
   {
     var path = Path.Combine(FileLoading.BaseDirectory, "expand_prefabs_old.yaml");

@@ -39,6 +39,11 @@ internal static class EwpProfiler
   private static readonly List<SlowEvent> Slow = new();
   // Connection lifecycle markers are kept only for the current capture segment.
   private static readonly List<PlayerMarker> PlayerMarkers = new();
+  // Updated only when EWP successfully rebuilds YAML rules, never on the rule hot path.
+  private static readonly Dictionary<string, RuleSource> LoadedRuleSources = new(StringComparer.Ordinal);
+  // Preserve source versions observed within this report segment.
+  private static readonly Dictionary<string, RuleSource> SegmentRuleSources = new(StringComparer.Ordinal);
+  private static int RuleSourceReloads;
   private static readonly Dictionary<string, SpawnTotals> SpawnStats = new(StringComparer.Ordinal);
   private static readonly List<SpawnEvent> SpawnEvents = new();
   private const int MaxSpawnEvents = 6000;
@@ -74,6 +79,38 @@ internal static class EwpProfiler
   internal static bool SearchActive => Running && Searches.Value;
   internal static bool ChainActive => Running && Chains.Value;
   internal static bool SpawnActive => Running && SpawnProfiling != null && SpawnProfiling.Value;
+
+  internal sealed class RuleSource(
+    string ruleIdentity, string sourceFile, int ruleEntry, int yamlItem,
+    int startLine, int endLine, string contentHash)
+  {
+    internal string RuleIdentity { get; } = ruleIdentity;
+    internal string SourceFile { get; } = sourceFile;
+    internal int RuleEntry { get; } = ruleEntry;
+    internal int YamlItem { get; } = yamlItem;
+    internal int StartLine { get; } = startLine;
+    internal int EndLine { get; } = endLine;
+    internal string ContentHash { get; } = contentHash;
+    internal string VersionKey => RuleIdentity + "\u001f" + ContentHash + "\u001f" +
+      YamlItem + "\u001f" + StartLine + "\u001f" + EndLine + "\u001f" + SourceFile;
+  }
+
+  internal static void SetLoadedRuleSources(IEnumerable<RuleSource> sources)
+  {
+    var next = new Dictionary<string, RuleSource>(StringComparer.Ordinal);
+    foreach (var source in sources) next[source.RuleIdentity] = source;
+    lock (Sync)
+    {
+      bool changed = LoadedRuleSources.Count != next.Count ||
+        LoadedRuleSources.Any(pair => !next.TryGetValue(pair.Key, out var value) ||
+          pair.Value.VersionKey != value.VersionKey);
+      if (Running && LoadedRuleSources.Count > 0 && changed) RuleSourceReloads++;
+      LoadedRuleSources.Clear();
+      foreach (var pair in next) LoadedRuleSources.Add(pair.Key, pair.Value);
+      if (Running)
+        foreach (var source in next.Values) SegmentRuleSources[source.VersionKey] = source;
+    }
+  }
 
   internal static void Initialize(ConfigFile config)
   {
@@ -174,6 +211,9 @@ internal static class EwpProfiler
       if (Running) return false;
       Stats.Clear(); DirectStats.Clear(); SearchStats.Clear(); ChainStats.Clear(); Seconds.Clear(); Slow.Clear(); PlayerMarkers.Clear();
       SpawnStats.Clear(); SpawnEvents.Clear(); DroppedSpawnEvents = 0; SpawnProfilerErrors = 0;
+      SegmentRuleSources.Clear();
+      foreach (var source in LoadedRuleSources.Values) SegmentRuleSources[source.VersionKey] = source;
+      RuleSourceReloads = 0;
       DroppedChains = 0; DroppedSlow = 0; ScopeOrderErrors = 0;
       CaptureGeneration++;
       StartUtc = DateTime.UtcNow;
@@ -704,7 +744,7 @@ internal static class EwpProfiler
     var searches = SearchStats.ToArray();
     var chains = ChainStats.Values.ToArray();
     var lines = new List<string> {
-      "EWP internal profiler 1.11 — instrumented wall-clock, NOT actual thread CPU time",
+      "EWP internal profiler 1.12 — instrumented wall-clock, NOT actual thread CPU time",
       "EWP source version: " + EWP.VERSION,
       "DevAssistant export interface: contract=1, capabilities=1, thread-safe session epoch (role compatibility protocol 176 not asserted)",
       "UTC start: " + StartUtc.ToString("O", Invariant),
@@ -728,6 +768,8 @@ internal static class EwpProfiler
       "Individual spawn events: failed attempts by default, or all EWP spawns when RecordAllSpawnEvents is enabled. Vanilla spawns are not attributed.",
       "Player lifecycle markers: " + PlayerMarkers.Count + " (joins: " + PlayerMarkers.Count(m => m.Kind == "join") + ", leaves: " + PlayerMarkers.Count(m => m.Kind == "leave") + ")",
       "Player marker numbers are server-session connection ordinals, not persistent character IDs; ZDO identities allow matching join/leave within the same session.",
+      "Successful rule-source changes during this segment: " + RuleSourceReloads +
+        (RuleSourceReloads > 0 ? "; repeated RuleIdentity values may combine measurements from different loaded YAML versions." : ""),
       "Slow-event threshold ms: " + Num(Detailed.Value ? SlowMs.Value / 4d : SlowMs.Value) + (Detailed.Value ? " (detailed mode)" : " (baseline mode)"),
       "Out-of-order profiler scope disposals: " + ScopeOrderErrors,
       "Timing: inclusive/exclusive are for *instrumented* nested scopes; exclusive includes uninstrumented children and is NOT CPU time.",
@@ -784,6 +826,12 @@ internal static class EwpProfiler
     else
       lines.Add("GC boundary samples: disabled");
     Write("ProfilerSummary.txt", lines);
+    var sourceRows = new List<string> { "RuleIdentity\tSourceFile\tRuleEntry\tYamlItem\tStartLine\tEndLine\tContentHash" };
+    foreach (var source in SegmentRuleSources.Values.OrderBy(s => s.RuleIdentity, StringComparer.Ordinal)
+      .ThenBy(s => s.ContentHash, StringComparer.Ordinal).ThenBy(s => s.StartLine))
+      sourceRows.Add(Clean(source.RuleIdentity) + "\t" + Clean(source.SourceFile) + "\t" +
+        source.RuleEntry + "\t" + source.YamlItem + "\t" + source.StartLine + "\t" + source.EndLine + "\t" + Clean(source.ContentHash));
+    Write("ProfilerRuleSources.tsv", sourceRows);
 
     var general = new List<string> { "Kind\tIdentity\tCalls\tInclusiveMs\tExclusiveMs\tAverageMs\tMaxMs\tP50BucketLowerMs\tP95BucketLowerMs\tP99BucketLowerMs" };
     foreach (var kv in stats.OrderByDescending(x => x.Value.Inclusive))

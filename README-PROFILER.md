@@ -79,6 +79,23 @@ Files are created as one timestamped run directory:
 9. `ProfilerPlayerEvents.tsv` — all actual player joins and disconnects occurring during this segment: join ordinal (server-session connection number), Player-ZDO identity, elapsed time in milliseconds and seconds, UTC and Europe/Berlin clock time. No player names or addresses are stored. A long scope is counted at its **completion** second (not apportioned among seconds).
 10. `ProfilerPhases.tsv` — complete EWP update phase durations, grouped by completion second: `SecondSinceStart`, `Phase`, `Calls`, `TotalWallMs`, `MaxCallMs`. Phases are `created`, `changed`, `spawn`, `remove`, `pokes`, `exec`, `rpc`, `terrain`, `owner` and `saved-data`. They wrap HandleCreated, HandleChanged, the respective delayed queues, and DataStorage.SaveSavedData. All executed calls, including empty queue checks, are counted while the profiler is active. Whole-capture phase aggregates also appear in `ProfilerRules.tsv` under `Kind=tick`. These inclusive durations contain nested rule/search work and must not be added to those costs; they measure processing, not configured delays or queue waiting. Phase values include all scripts, not just Enigma paths. `TerrainSnapshot.Execute` remains outside these ten phase scopes.
 
+**YAML source lookup (Profiler 1.12):** `ProfilerRuleSources.tsv` maps the
+unchanged `RuleIdentity` to `SourceFile` (relative to BepInEx/config),
+1-based `RuleEntry` (script-only), 1-based `YamlItem` (full mixed YAML list),
+and the original `StartLine`/`EndLine` before shorthand normalization.
+`EndLine` is inclusive and includes any comments or blank lines preceding
+the next top-level item. `ContentHash` is the existing SHA-256 of the
+successfully parsed text snapshot, encoded in Base64. One YAML item expanded
+by `types` yields multiple rows with the same physical source location.
+No YAML source information is looked up during rule execution.
+
+If a successfully loaded prefab YAML changes while a segment is active,
+`ProfilerSummary.txt` reports the number of rule-source changes.
+`ProfilerRuleSources.tsv` then retains both observed mappings when their
+versions differ. Existing metric columns and identities are unchanged:
+measurements sharing a `RuleIdentity` may include work from both versions,
+and must not be interpreted as version-separated.
+
 Each segment is written when it ends: on the interval, on the next `LateUpdate` after world-save initiation, on first-join phase transition, by manual command, or on `ZNet.Shutdown`/plugin destruction. Reports are *never* written for every event. TSVs use UTF-8 (no BOM); tabs and newlines in text fields are sanitized. Interleaved server/client logs are not needed.
 
 ## Interpretation & limits

@@ -9,3 +9,5 @@ Removed: PR #5 runtime implementation; teleport watches and quarantine; gameplay
 Upstream behavior retained: rules, chances, selection order, inventory loading, RPCs, queues, saved timer format, server-side save snapshots, config handling, YAML change detector and terrain handling.
 
 Validation of this revision: Release compilation successful; 356/356 tests passed. RuleLog_ShutdownDuringStall uses Stop(0) so the sink is released only after an already-expired shutdown budget, avoiding the race between Join(timeout) and the Stopwatch deadline. Production rule logging remains exactly upstream. In-game validation and CI not run. NU1900 prevented confirmation of package vulnerability data.
+
+Source lookup (Profiler 1.12): record original mixed YAML item/start/end lines and the successfully cached source text hash; export ProfilerRuleSources.tsv without changing RuleIdentity or rule hot-path work. Report source changes during active capture; aggregated measurements remain unchanged and may mix versions after a reload.

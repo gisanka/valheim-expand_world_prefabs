@@ -8,11 +8,23 @@ namespace Service;
 
 public class Yaml
 {
+  // Physical source coordinates in the original mixed YAML text, before normalization.
+  // EndLine is inclusive and includes trailing comments/blank lines before the next item.
+  public readonly struct SourceSpan(int yamlItem, int startLine, int endLine)
+  {
+    public int YamlItem { get; } = yamlItem;
+    public int StartLine { get; } = startLine;
+    public int EndLine { get; } = endLine;
+  }
+
   public class MixedFileEntries
   {
     public List<ExpandWorld.Prefab.RuleYaml> ScriptEntries = [];
     public List<Data.DataYaml> DataEntries = [];
     public List<ExpandWorld.Prefab.ConfigYaml> ConfigEntries = [];
+    public List<SourceSpan> ScriptSources = [];
+    // Set only when FileLoading successfully stores the parsed text snapshot.
+    public string ContentHash = "";
   }
 
   // Parse an already read text snapshot; never reads or modifies files.
@@ -36,6 +48,10 @@ public class Yaml
       {
         if (!Deserialize(file, PreParse([.. split.ScriptLines]), out List<ExpandWorld.Prefab.RuleYaml> rules, out error)) return false;
         parsed.ScriptEntries = rules;
+        // Keep source indices parallel to the successfully deserialized script list.
+        // An unusual parser count mismatch must not affect rule loading.
+        if (rules.Count == split.ScriptSources.Count)
+          parsed.ScriptSources = split.ScriptSources;
         parsed.DataEntries.AddRange(ExpandWorld.Prefab.DataField.Hoist(rules, file));
       }
       if (split.DataLines.Count > 0)
@@ -63,6 +79,7 @@ public class Yaml
     public List<string> ScriptLines = [];
     public List<string> DataLines = [];
     public List<string> ConfigLines = [];
+    public List<SourceSpan> ScriptSources = [];
   }
 
   private static MixedSplit SplitMixed(string[] lines)
@@ -70,12 +87,15 @@ public class Yaml
     var split = new MixedSplit();
     List<string> pending = [];
     List<string> block = [];
-    foreach (var line in lines)
+    int yamlItem = 0;
+    int startLine = 0;
+    for (int i = 0; i < lines.Length; i++)
     {
+      var line = lines[i];
       if (IsTopLevelListItem(line))
       {
         if (block.Count > 0)
-          AddMixedBlock(split, block);
+          AddMixedBlock(split, block, new SourceSpan(yamlItem, startLine, i));
         block = [];
         if (pending.Count > 0)
         {
@@ -83,6 +103,8 @@ public class Yaml
           pending.Clear();
         }
         block.Add(line);
+        yamlItem++;
+        startLine = i + 1;
       }
       else
       {
@@ -93,18 +115,21 @@ public class Yaml
       }
     }
     if (block.Count > 0)
-      AddMixedBlock(split, block);
+      AddMixedBlock(split, block, new SourceSpan(yamlItem, startLine, lines.Length));
     return split;
   }
 
-  private static void AddMixedBlock(MixedSplit split, List<string> block)
+  private static void AddMixedBlock(MixedSplit split, List<string> block, SourceSpan source)
   {
     if (IsConfigBlock(block))
       split.ConfigLines.AddRange(block);
     else if (IsDataBlock(block))
       split.DataLines.AddRange(block);
     else
+    {
       split.ScriptLines.AddRange(block);
+      split.ScriptSources.Add(source);
+    }
   }
 
   private static bool IsTopLevelListItem(string line)

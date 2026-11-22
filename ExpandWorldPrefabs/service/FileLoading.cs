@@ -159,6 +159,7 @@ public static class FileLoading
         Log.Warning($"YAML reload skipped '{DisplayPath(file.Path)}': {error}. Previous valid entries remain active (if any).");
         continue;
       }
+      entries.ContentHash = file.Hash; // Hash of precisely the text snapshot that parsed successfully.
       Cache.Store(file.Path, entries);
       modified++;
       prefabs |= IsPrefabPath(file.Path);

@@ -21,7 +21,9 @@ public sealed class YamlFileCache
     Data.DataLoading.LoadFromFiles(dataFiles, Project(dataFiles, entries => entries.DataEntries));
     if (prefabFiles == null) return;
     ExpandWorld.Prefab.ConfigManager.LoadFromFiles(prefabFiles, Project(prefabFiles, entries => entries.ConfigEntries));
-    ExpandWorld.Prefab.Loading.LoadFromFiles(prefabFiles, Project(prefabFiles, entries => entries.ScriptEntries));
+    ExpandWorld.Prefab.Loading.LoadFromFiles(prefabFiles,
+      Project(prefabFiles, entries => entries.ScriptEntries),
+      Project(prefabFiles, entries => entries));
   }
 
   private Dictionary<string, List<T>> Project<T>(List<string> paths, Func<Yaml.MixedFileEntries, List<T>> select) =>

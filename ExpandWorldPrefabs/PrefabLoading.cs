@@ -9,19 +9,22 @@ namespace ExpandWorld.Prefab;
 
 public class Loading
 {
-  public static void LoadFromFiles(List<string> files, Dictionary<string, List<RuleYaml>> fileEntries)
+  public static void LoadFromFiles(List<string> files, Dictionary<string, List<RuleYaml>> fileEntries,
+    Dictionary<string, Yaml.MixedFileEntries>? sourceFiles = null)
   {
     if (Helper.IsClient()) return;
-    RebuildFromCache(files, fileEntries);
+    RebuildFromCache(files, fileEntries, sourceFiles);
   }
 
-  private static void RebuildFromCache(List<string> files, Dictionary<string, List<RuleYaml>> fileEntries)
+  private static void RebuildFromCache(List<string> files, Dictionary<string, List<RuleYaml>> fileEntries,
+    Dictionary<string, Yaml.MixedFileEntries>? sourceFiles)
   {
     using var profile = EwpProfiler.Begin("yaml-rebuild", "Loading.RebuildFromCache");
     InfoManager.Clear();
     var data = files.Where(fileEntries.ContainsKey).SelectMany(f => fileEntries[f]).ToList();
     if (data.Count == 0)
     {
+      EwpProfiler.SetLoadedRuleSources([]);
       RuleLog.Configure([]);
       Log.Warning($"Failed to load any prefab data.");
       return;
@@ -29,15 +32,24 @@ public class Loading
     Log.Info($"Loaded {data.Count} prefab rules.");
     // Preserve provenance before runtime rule expansion (including multiple action types).
     var items = new List<Rule>();
+    var sources = new List<EwpProfiler.RuleSource>();
     foreach (var file in files)
     {
       if (!fileEntries.TryGetValue(file, out var entries)) continue;
+      Yaml.MixedFileEntries? parsed = null;
+      if (sourceFiles != null) sourceFiles.TryGetValue(file, out parsed);
       for (var index = 0; index < entries.Count; index++)
       {
         foreach (var rule in FromData(entries[index]))
         {
           rule.ProfilerKey = file + "#entry=" + (index + 1) + "|" + rule.Type + "|" + rule.Prefabs + "|" + string.Join(" ", rule.Args);
           items.Add(rule);
+          if (parsed != null && index < parsed.ScriptSources.Count)
+          {
+            var span = parsed.ScriptSources[index];
+            sources.Add(new EwpProfiler.RuleSource(rule.ProfilerKey, FileLoading.DisplayPath(file),
+              index + 1, span.YamlItem, span.StartLine, span.EndLine, parsed.ContentHash));
+          }
         }
       }
     }
@@ -45,6 +57,7 @@ public class Loading
     foreach (var item in items)
       InfoManager.Add(item);
     InfoManager.Patch();
+    EwpProfiler.SetLoadedRuleSources(sources);
   }
 
   public static Rule[] FromData(RuleYaml data)
