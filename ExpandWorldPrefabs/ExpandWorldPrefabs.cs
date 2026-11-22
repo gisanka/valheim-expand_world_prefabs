@@ -76,6 +76,22 @@ public class EWP : BaseUnityPlugin
     {
       args.Context.AddString(EwpProfiler.Stop() ? "Profiler capture written." : "Profiler is not active.");
     }, true);
+    new Terminal.ConsoleCommand("ewp_profiler_mark", "Add a timestamped label to the active EWP profiler segment.", (args) =>
+    {
+      if (ZNet.instance == null || !ZNet.instance.IsServer())
+      {
+        args.Context.AddString("Profiler: requires the server world.");
+        return;
+      }
+      if (args.Length < 2)
+      {
+        args.Context.AddString("Usage: ewp_profiler_mark <label>");
+        return;
+      }
+      var label = string.Join(" ", args.Args.Skip(1));
+      args.Context.AddString(EwpProfiler.Mark(label) ? "Profiler mark recorded." :
+        "Profiler mark not recorded (inactive or mark limit reached).");
+    }, true);
     new Terminal.ConsoleCommand("ewp_itemtype", "Lists the itemtype_* value groups that can be used in prefab.", (args) =>
     {
       if (!ObjectDB.instance)
@@ -89,23 +105,32 @@ public class EWP : BaseUnityPlugin
   }
   public void LateUpdate()
   {
-    EwpProfiler.Tick();
-    ConfigManager.Flush();
-    if (ZNet.instance == null) return;
-    if (ZNet.instance.IsServer()) EwpProfiler.ServerStarting("first-server-tick");
-    FileLoading.Update();
-    using (EwpProfiler.Begin("tick", "created")) HandleCreated.Execute();
-    using (EwpProfiler.Begin("tick", "changed")) HandleChanged.Execute();
-    using (EwpProfiler.Begin("tick", "spawn")) DelayedSpawn.Execute();
-    using (EwpProfiler.Begin("tick", "remove")) DelayedRemove.Execute();
-    using (EwpProfiler.Begin("tick", "pokes")) DelayedPoke.Execute();
-    using (EwpProfiler.Begin("tick", "exec")) DelayedExec.Execute();
-    using (EwpProfiler.Begin("tick", "rpc")) DelayedRpc.Execute();
-    using (EwpProfiler.Begin("tick", "terrain")) DelayedTerrain.Execute();
-    TerrainSnapshot.Execute();
-    using (EwpProfiler.Begin("tick", "owner")) DelayedOwner.Execute();
-    using (EwpProfiler.Begin("tick", "saved-data")) DataStorage.SaveSavedData();
-    EwpProfiler.Tick();
+    var started = EwpProfiler.Active ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+    try
+    {
+      EwpProfiler.Tick();
+      ConfigManager.Flush();
+      if (ZNet.instance == null) return;
+      if (ZNet.instance.IsServer()) EwpProfiler.ServerStarting("first-server-tick");
+      FileLoading.Update();
+      using (EwpProfiler.Begin("tick", "created")) HandleCreated.Execute();
+      using (EwpProfiler.Begin("tick", "changed")) HandleChanged.Execute();
+      using (EwpProfiler.Begin("tick", "spawn")) DelayedSpawn.Execute();
+      using (EwpProfiler.Begin("tick", "remove")) DelayedRemove.Execute();
+      using (EwpProfiler.Begin("tick", "pokes")) DelayedPoke.Execute();
+      using (EwpProfiler.Begin("tick", "exec")) DelayedExec.Execute();
+      using (EwpProfiler.Begin("tick", "rpc")) DelayedRpc.Execute();
+      using (EwpProfiler.Begin("tick", "terrain")) DelayedTerrain.Execute();
+      TerrainSnapshot.Execute();
+      using (EwpProfiler.Begin("tick", "owner")) DelayedOwner.Execute();
+      using (EwpProfiler.Begin("tick", "saved-data")) DataStorage.SaveSavedData();
+      EwpProfiler.Tick();
+    }
+    finally
+    {
+      if (started != 0)
+        EwpProfiler.RecordUpdate(started, System.Diagnostics.Stopwatch.GetTimestamp());
+    }
   }
   public void OnDestroy()
   {

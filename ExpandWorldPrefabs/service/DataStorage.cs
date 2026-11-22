@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using Data;
 using Common;
 
@@ -33,18 +34,32 @@ public class DataStorage
   private static bool UnsavedChanges = false;
   public static void SaveSavedData()
   {
-    if (!UnsavedChanges) return;
+    if (!UnsavedChanges) { ExpandWorld.Prefab.EwpProfiler.SavedDataSkipped(false); return; }
     // Save every 10 seconds at most.
-    if (LastSaveStopwatch.Elapsed.TotalSeconds < 10) return;
+    if (LastSaveStopwatch.Elapsed.TotalSeconds < 10)
+    {
+      ExpandWorld.Prefab.EwpProfiler.SavedDataSkipped(true);
+      return;
+    }
     LastSaveStopwatch.Restart();
-    if (!Directory.Exists(FileLoading.BaseDirectory))
-      Directory.CreateDirectory(FileLoading.BaseDirectory);
-    var yaml = Yaml.SerializeData(Database);
+    ExpandWorld.Prefab.EwpProfiler.SavedDataWriteStarted(Database.Count);
+    using (ExpandWorld.Prefab.EwpProfiler.Begin("saved-data-detail", "directory"))
+    {
+      if (!Directory.Exists(FileLoading.BaseDirectory))
+        Directory.CreateDirectory(FileLoading.BaseDirectory);
+    }
+    string yaml;
+    using (ExpandWorld.Prefab.EwpProfiler.Begin("saved-data-detail", "serialize"))
+      yaml = Yaml.SerializeData(Database);
     // No watcher covers this file, so keep the first pre-write copy of each day.
-    FileLoading.BackupFile(SavedDataFile, false);
-    File.WriteAllText(SavedDataFile, yaml);
+    using (ExpandWorld.Prefab.EwpProfiler.Begin("saved-data-detail", "backup"))
+      FileLoading.BackupFile(SavedDataFile, false);
+    using (ExpandWorld.Prefab.EwpProfiler.Begin("saved-data-detail", "write"))
+      File.WriteAllText(SavedDataFile, yaml);
     // A failed write must remain dirty so the existing save loop retries.
     UnsavedChanges = false;
+    if (ExpandWorld.Prefab.EwpProfiler.Active)
+      ExpandWorld.Prefab.EwpProfiler.SavedDataWriteCompleted(Encoding.UTF8.GetByteCount(yaml));
   }
   public static Action<string, string>? OnSet;
   public static string GetValue(string key, string defaultValue = "") => Database.TryGetValue(key.ToLowerInvariant(), out var value) ? value : defaultValue;

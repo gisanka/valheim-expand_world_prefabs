@@ -59,9 +59,9 @@ public class InfoSelector
       .Where(d => d.MaxAltitude == null || !d.MaxAltitude.TryGet(f, out var v) || v >= waterY)
       .Where(d => Helper.HasEveryGlobalKey(d.GlobalKeys, f))
       .Where(d => !Helper.HasAnyGlobalKey(d.BannedGlobalKeys, f))
-      .Where(d => DataStorage.HasEveryKey(d.Keys, f))
-      .Where(d => !DataStorage.HasAnyKey(d.BannedKeys, f))
-      .Where(d => d.Condition == null || d.Condition.Evaluate(f));
+      .Where(d => CheckSavedKeys(d, f))
+      .Where(d => CheckBannedKeys(d, f))
+      .Where(d => CheckCondition(d, f));
     // Minor optimization to resolve simpler checks first (not measured).
     linq = [.. linq];
     if (linq.Any(d => d.AltBiomes != null || d.BannedAltBiomes != null))
@@ -154,6 +154,26 @@ public class InfoSelector
     Rule[] result = [.. linq];
     return result.Length == 0 ? null : result;
   }
+  private static bool CheckSavedKeys(Rule rule, Functions f)
+  {
+    if (!rule.ProfileDetails || !EwpProfiler.Active) return DataStorage.HasEveryKey(rule.Keys, f);
+    using var profile = EwpProfiler.BeginRuleDetail(rule, "saved-keys");
+    return DataStorage.HasEveryKey(rule.Keys, f);
+  }
+  private static bool CheckBannedKeys(Rule rule, Functions f)
+  {
+    if (!rule.ProfileDetails || !EwpProfiler.Active) return !DataStorage.HasAnyKey(rule.BannedKeys, f);
+    using var profile = EwpProfiler.BeginRuleDetail(rule, "banned-keys");
+    return !DataStorage.HasAnyKey(rule.BannedKeys, f);
+  }
+  private static bool CheckCondition(Rule rule, Functions f)
+  {
+    if (rule.Condition == null) return true;
+    if (!rule.ProfileDetails || !EwpProfiler.Active) return rule.Condition.Evaluate(f);
+    using var profile = EwpProfiler.BeginRuleDetail(rule, "condition");
+    return rule.Condition.Evaluate(f);
+  }
+
   private static bool CheckRequiredObjects(Rule rule, ZDO zdo, Functions f)
   {
     if (rule.Objects == null) return true;
@@ -304,9 +324,9 @@ public class InfoSelector
       .Where(d => d.MaxAltitude == null || !d.MaxAltitude.TryGet(f, out var v) || v >= waterY)
       .Where(d => Helper.HasEveryGlobalKey(d.GlobalKeys, f))
       .Where(d => !Helper.HasAnyGlobalKey(d.BannedGlobalKeys, f))
-      .Where(d => DataStorage.HasEveryKey(d.Keys, f))
-      .Where(d => !DataStorage.HasAnyKey(d.BannedKeys, f))
-      .Where(d => d.Condition == null || d.Condition.Evaluate(f));
+      .Where(d => CheckSavedKeys(d, f))
+      .Where(d => CheckBannedKeys(d, f))
+      .Where(d => CheckCondition(d, f));
 
 
     Rule[] result = [.. linq];

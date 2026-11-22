@@ -109,6 +109,82 @@ public class ProfilerPhaseTests
   }
 
   [Test]
+  public void SavedDataCounters_RecordSkippedAndCompletedWrites()
+  {
+    Start("saved-data");
+    EwpProfiler.SavedDataSkipped(false);
+    EwpProfiler.SavedDataSkipped(true);
+    EwpProfiler.SavedDataWriteStarted(44);
+    EwpProfiler.SavedDataWriteCompleted(512);
+    using (EwpProfiler.Begin("saved-data-detail", "serialize")) { }
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var summary = File.ReadAllText(Path.Combine(directory, "saved-data", "ProfilerSummary.txt"));
+    Assert.That(summary, Does.Contain("idle checks=1; cooldown checks=1; write attempts=1; completed=1"));
+    Assert.That(summary, Does.Contain("last database entries=44; last UTF-8 bytes=512"));
+    var scopes = File.ReadAllText(Path.Combine(directory, "saved-data", "ProfilerRules.tsv"));
+    Assert.That(scopes, Does.Contain("saved-data-detail\tserialize"));
+  }
+
+  [Test]
+  public void RuntimeAndManualMarkers_AreReported()
+  {
+    Start("runtime");
+    var now = System.Diagnostics.Stopwatch.GetTimestamp();
+    EwpProfiler.RecordUpdate(now, now + System.Diagnostics.Stopwatch.Frequency / 100);
+    EwpProfiler.RecordPokeDispatch(0.25, true);
+    Assert.That(EwpProfiler.Mark("manual-item-spawn"), Is.True);
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var runtime = File.ReadAllLines(Path.Combine(directory, "runtime", "ProfilerRuntime.tsv"));
+    Assert.That(runtime.Length, Is.GreaterThan(1));
+    Assert.That(runtime[0], Does.Contain("EwpLateUpdateMaxMs"));
+    Assert.That(runtime.Skip(1).Any(row => row.Split('\t')[14] == "1"), Is.True,
+      "A restored poke must be counted without claiming a trace origin.");
+    var markers = File.ReadAllText(Path.Combine(directory, "runtime", "ProfilerMarkers.tsv"));
+    Assert.That(markers, Does.Contain("manual-item-spawn"));
+  }
+
+  [Test]
+  public void SlowRootTrace_RetainsBoundedChildHierarchy()
+  {
+    var setting = (ConfigEntry<bool>)typeof(EwpProfiler)
+      .GetField("CaptureSlowRootTrees", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    var threshold = (ConfigEntry<float>)typeof(EwpProfiler)
+      .GetField("SlowRootThreshold", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    setting.Value = true;
+    threshold.Value = 0f;
+    Start("slow-roots");
+    using (EwpProfiler.Begin("event", "root"))
+    {
+      using (EwpProfiler.Begin("rule", "child")) { }
+    }
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var rows = File.ReadAllLines(Path.Combine(directory, "slow-roots", "ProfilerSlowRoots.tsv"));
+    Assert.That(rows.Length, Is.EqualTo(3));
+    var root = rows[1].Split('\t');
+    var child = rows[2].Split('\t');
+    Assert.That(root[0], Is.EqualTo(child[0]));
+    Assert.That(root[1], Is.EqualTo(child[2]), "Child parent span must match root span.");
+    Assert.That(child[4], Is.EqualTo("rule"));
+  }
+
+  [Test]
+  public void TargetedRuleScopes_AreAttributedWithoutTouchingUnselectedRules()
+  {
+    Start("target-rule");
+    var selected = new Rule { ProfilerKey = "source#entry=2|Create|Player|", ProfileDetails = true };
+    var other = new Rule { ProfilerKey = "source#entry=3|Create|Player|", ProfileDetails = false };
+    using (EwpProfiler.BeginRule(selected))
+      using (EwpProfiler.BeginRuleDetail(selected, "condition")) { }
+    using (EwpProfiler.BeginRule(other))
+      using (EwpProfiler.BeginRuleDetail(other, "condition")) { }
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var rows = File.ReadAllLines(Path.Combine(directory, "target-rule", "ProfilerRules.tsv"))
+      .Skip(1).Where(x => x.StartsWith("rule-detail\t")).ToArray();
+    Assert.That(rows.Length, Is.EqualTo(1));
+    Assert.That(rows[0], Does.Contain("condition"));
+  }
+
+  [Test]
   public void NewCapture_DiscardsPreviousPhaseBuckets_AndIgnoresInactiveScopes()
   {
     Start("first");

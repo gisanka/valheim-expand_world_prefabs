@@ -12,9 +12,10 @@ public static class PokeTimers
 {
   private const int Format = 2;
   private static readonly int StorageHash = ZdoHelper.Hash("ewp_pending_pokes");
-  private sealed class Entry(ZDOID id, double due, string[] args, EwpProfiler.TraceToken trace = default)
+  private sealed class Entry(ZDOID id, double due, string[] args, EwpProfiler.TraceToken trace = default, bool restored = false)
   {
     internal readonly EwpProfiler.TraceToken Trace = trace;
+    internal readonly bool Restored = restored;
     internal readonly ZDOID Id = id;
     internal readonly double Due = due;
     internal readonly string[] Args = args;
@@ -22,6 +23,8 @@ public static class PokeTimers
   private static readonly DelayedQueue<Entry> Pending = new();
   private static readonly Dictionary<ZDOID, List<Entry>> ByTarget = [];
   private static readonly HashSet<ZDOID> Dirty = [];
+  private static int ScheduledCount;
+  internal static int PendingCount => ScheduledCount;
 
   public static void Initialize()
   {
@@ -34,11 +37,13 @@ public static class PokeTimers
     Pending.Clear();
     ByTarget.Clear();
     Dirty.Clear();
+    ScheduledCount = 0;
   }
 
   private static void Insert(Entry entry)
   {
     Pending.Add(entry.Due, entry);
+    ScheduledCount++;
     Dirty.Add(entry.Id);
     if (!ByTarget.TryGetValue(entry.Id, out var entries))
       ByTarget[entry.Id] = entries = [];
@@ -74,15 +79,19 @@ public static class PokeTimers
   private static void Remove(Entry entry)
   {
     var entries = ByTarget[entry.Id];
-    entries.Remove(entry);
+    if (entries.Remove(entry)) ScheduledCount--;
     if (entries.Count == 0) ByTarget.Remove(entry.Id);
     Dirty.Add(entry.Id);
   }
 
   private static void Remove(ZDOID id)
   {
-    if (ByTarget.Remove(id))
+    if (ByTarget.TryGetValue(id, out var entries))
+    {
+      ScheduledCount -= entries.Count;
+      ByTarget.Remove(id);
       Pending.RemoveWhere(entry => entry.Id == id);
+    }
     Dirty.Remove(id);
   }
 
@@ -96,6 +105,7 @@ public static class PokeTimers
         Remove(entry);
         if (ZDOMan.instance.GetZDO(entry.Id) != null)
         {
+          EwpProfiler.RecordPokeDispatch(ZNet.instance.m_netTime - entry.Due, entry.Restored);
           using var profiling = EwpProfiler.BeginDeferred(entry.Trace, entry.Args.Length > 0 ? entry.Args[0] : "");
           Manager.Handle(ActionType.Poke, entry.Args, entry.Id);
         }
@@ -160,7 +170,7 @@ public static class PokeTimers
         var args = new string[argc];
         for (var a = 0; a < argc; a++)
           args[a] = pkg.ReadString();
-        loaded.Add(new Entry(target.m_uid, due, args));
+        loaded.Add(new Entry(target.m_uid, due, args, default, true));
       }
       if (pkg.GetPos() != pkg.Size()) throw new InvalidOperationException("Trailing poke timer data.");
       foreach (var entry in loaded) Insert(entry);

@@ -33,19 +33,22 @@ public class Manager
     using var profiling = EwpProfiler.BeginRule(info);
     if (info.Chance != null)
     {
-      var chance = info.Chance.Get(f);
-      if (chance != null && chance < 1f)
+      using (EwpProfiler.BeginRuleDetail(info, "chance"))
       {
-        if (UnityEngine.Random.value > chance)
-          return;
+        var chance = info.Chance.Get(f);
+        if (chance != null && chance < 1f)
+        {
+          if (UnityEngine.Random.value > chance)
+            return;
+        }
       }
     }
 
     if (info.LogSources != null && Config.RuleLogging)
       RuleLog.Write(info.LogSources, f);
-    DelayedExec.Add(info, f);
+    using (EwpProfiler.BeginRuleDetail(info, "exec-queue")) DelayedExec.Add(info, f);
     if (info.Commands.Length > 0)
-      Commands.Run(info, f);
+      using (EwpProfiler.BeginRuleDetail(info, "commands")) Commands.Run(info, f);
     var weightedClientRpc = info.GetWeightedClientRpc(f);
     if (weightedClientRpc != null)
       weightedClientRpc.InvokeGlobal(f);
@@ -93,11 +96,14 @@ public class Manager
     using var profiling = EwpProfiler.BeginRule(info);
     if (info.Chance != null)
     {
-      var chance = info.Chance.Get(f);
-      if (chance != null && chance < 1f)
+      using (EwpProfiler.BeginRuleDetail(info, "chance"))
       {
-        if (UnityEngine.Random.value > chance)
-          return false;
+        var chance = info.Chance.Get(f);
+        if (chance != null && chance < 1f)
+        {
+          if (UnityEngine.Random.value > chance)
+            return false;
+        }
       }
     }
 
@@ -106,9 +112,9 @@ public class Manager
 
     if (info.LogSources != null && Config.RuleLogging)
       RuleLog.Write(info.LogSources, f);
-    DelayedExec.Add(info, f);
+    using (EwpProfiler.BeginRuleDetail(info, "exec-queue")) DelayedExec.Add(info, f);
     if (info.Commands.Length > 0)
-      Commands.Run(info, f);
+      using (EwpProfiler.BeginRuleDetail(info, "commands")) Commands.Run(info, f);
 
     var weightedObjectRpc = info.GetWeightedObjectRpc(f);
     if (weightedObjectRpc != null)
@@ -123,7 +129,8 @@ public class Manager
       ClientRpc(info.ClientRpcs, zdo, f);
 
     var remove = info.Remove?.GetBool(f) == true;
-    var data = DataHelper.Get(info.Data, f);
+    DataEntry? data;
+    using (EwpProfiler.BeginRuleDetail(info, "data-read")) data = DataHelper.Get(info.Data, f);
     var inject = info.InjectData ?? data?.CanBeInjected ?? false;
     var regenerate = info.Regenerate && !inject;
     var attach = info.Attach?.Get(f);

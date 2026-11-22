@@ -205,3 +205,43 @@ ZDO writes, and gameplay behavior are unchanged.
 The former bounded path probe, its console commands, diagnostic lifecycle and dedicated rule-log reserve have been removed. General phase timings now belong to EwpProfiler and use the normal capture lifecycle, independent of Enigma mode and rule logging. The rule logger uses upstream behavior.
 
 ValheimLogExporter EWP Recording can complement these reports with timestamped rule admissions and source mapping from observed reloads. It does not record resolved actor/route/row/attempt identity or prove action completion. There is no replacement row-acceptance journal, resolved-poke-delay trace or Enigma receipt validation in this branch. Spawn profiling continues to record prefab, source rule and creation phases through EwpProfiler. Existing report columns remain unchanged; ProfilerPhases.tsv is additive. The added outer tick scopes increase root timeline coverage and reduce duplicate nested root calls for those phases, so older RootWallMs/RootCalls values are not directly comparable.
+
+## Additional profiling of slow roots and server updates
+
+The profiler now records `saved-data-detail` scopes for the rare actual data
+file save (directory, serialization, backup and write). `ProfilerSummary.txt`
+reports idle and cooldown calls, attempts, successful writes, database keys
+and UTF-8 output size. These counters are not a claim that every invocation
+performed disk I/O.
+
+For selected rules, `RuleDetailFilter` accepts a case-insensitive substring
+of the existing `RuleIdentity`. Matching is precomputed on YAML rebuild.
+Only these rules gain `rule-detail` scopes for condition, saved/banned-key
+tests, chance, queued exec and commands, and local data-read. It is disabled
+unless a filter is specified; the existing rule identity and columns stay
+unchanged. Enabling a filter requires a YAML rebuild/restart to take effect.
+
+`ProfilerSlowRoots.tsv` retains up to 120 root calls above
+`SlowRootThresholdMs` if `CaptureSlowRootTrees` is explicitly enabled.
+Per-thread scratch storage buffers at most 128 completed child scopes per
+root; traces do not represent uninstrumented work or causal follow-ups
+executed in later ticks. The report marks buffers that reached capacity.
+The mode is disabled by default to avoid per-scope overhead in routine
+captures.
+
+`ProfilerRuntime.tsv` reports per-second EWP `LateUpdate` wall time
+(sum/average/max and histogram bucket P95/P99), maximum interval between
+EWP update starts, periodic GC collection deltas, connected peer count,
+outstanding poke timers, and dispatch latency for newly created/restored
+poke timers. These are EWP update measurements, not whole Unity frame
+times, CPU time or exact GC pause durations. Timer lateness is measured
+in game-time seconds at dispatch, and may be affected by changes in the
+game clock. Some buckets can contain poke dispatches but no completed
+EWP update when profiling stops during a tick.
+
+Use `ewp_profiler_mark <label>` on the server to record a timestamped
+manual test marker. Up to 100 markers per segment are written to
+`ProfilerMarkers.tsv` with UTC and German time. Marks do not modify
+gameplay or segment boundaries.
+
+Profiler report label 1.13 adds saved-data/rule details, slow roots, runtime and markers without changing the existing 1.12 rule-source mapping.

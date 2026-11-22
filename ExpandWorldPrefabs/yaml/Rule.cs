@@ -188,6 +188,8 @@ public class Rule
 {
   // Stable within one file loading run; does not rely on ambiguous short rule identifiers.
   internal string ProfilerKey = "(unknown yaml rule)";
+  // Computed once on YAML rebuild; no per-selection string match.
+  internal bool ProfileDetails;
   public string Prefabs = "";
   public string ExcludedPrefabs = "";
   public ActionType Type = ActionType.Create;

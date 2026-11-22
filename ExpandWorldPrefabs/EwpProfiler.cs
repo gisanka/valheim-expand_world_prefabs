@@ -30,12 +30,27 @@ internal static class EwpProfiler
   private static ConfigEntry<bool> Allocations = null!;
   private static ConfigEntry<bool> SpawnProfiling = null!;
   private static ConfigEntry<bool> AllSpawnEvents = null!;
+  private static ConfigEntry<string> RuleDetailFilter = null!;
+  private static ConfigEntry<bool> CaptureSlowRootTrees = null!;
+  private static ConfigEntry<float> SlowRootThreshold = null!;
   private static readonly object Sync = new();
   private static readonly Dictionary<string, Totals> Stats = new(StringComparer.Ordinal);
   private static readonly Dictionary<string, DirectRuleTotals> DirectStats = new(StringComparer.Ordinal);
   private static readonly Dictionary<string, SearchTotals> SearchStats = new(StringComparer.Ordinal);
   private static readonly Dictionary<long, ChainTotals> ChainStats = new();
   private static readonly SortedDictionary<long, Timeline> Seconds = new();
+  private static readonly SortedDictionary<long, RuntimeRow> RuntimeSeconds = new();
+  private static readonly List<SlowRootTrace> SlowRoots = new();
+  private static readonly List<ProfilerMarker> Markers = new();
+  private const int MaxMarkers = 100;
+  private static int DroppedMarkers;
+  private const int MaxSlowRoots = 120;
+  private const int MaxRootSpans = 128;
+  private static int DroppedSlowRoots;
+  private static long LastUpdateStart;
+  private static long LastGcSecond;
+  private static int PreviousGc0, PreviousGc1, PreviousGc2;
+  [ThreadStatic] private static List<RootSpan>? RootScratch;
   private static readonly List<SlowEvent> Slow = new();
   // Connection lifecycle markers are kept only for the current capture segment.
   private static readonly List<PlayerMarker> PlayerMarkers = new();
@@ -67,6 +82,8 @@ internal static class EwpProfiler
   private static string OutputDirectory = "";
   private static int DroppedChains;
   private static int DroppedSlow;
+  private static long SavedDataIdleChecks, SavedDataCooldownChecks, SavedDataAttempts, SavedDataSuccesses;
+  private static long SavedDataLastEntries, SavedDataLastBytes, SavedDataTotalBytes;
   private const int MaxChains = 50000;
   private const int MaxSlow = 3000;
   private static volatile bool Running;
@@ -79,6 +96,32 @@ internal static class EwpProfiler
   internal static bool SearchActive => Running && Searches.Value;
   internal static bool ChainActive => Running && Chains.Value;
   internal static bool SpawnActive => Running && SpawnProfiling != null && SpawnProfiling.Value;
+  internal static bool ShouldProfileRuleDetails(string key) =>
+    RuleDetailFilter != null && !string.IsNullOrWhiteSpace(RuleDetailFilter.Value) &&
+    key.IndexOf(RuleDetailFilter.Value.Trim(), StringComparison.OrdinalIgnoreCase) >= 0;
+  internal static Scope BeginRuleDetail(Rule rule, string step) =>
+    Running && rule.ProfileDetails ? Begin("rule-detail", step, rule.ProfilerKey) : default;
+
+  // No-op return paths are counted without taking the profiler aggregate lock.
+  internal static void SavedDataSkipped(bool cooldown)
+  {
+    if (!Running) return;
+    if (cooldown) Interlocked.Increment(ref SavedDataCooldownChecks);
+    else Interlocked.Increment(ref SavedDataIdleChecks);
+  }
+  internal static void SavedDataWriteStarted(int entries)
+  {
+    if (!Running) return;
+    Interlocked.Increment(ref SavedDataAttempts);
+    Interlocked.Exchange(ref SavedDataLastEntries, entries);
+  }
+  internal static void SavedDataWriteCompleted(int bytes)
+  {
+    if (!Running) return;
+    Interlocked.Increment(ref SavedDataSuccesses);
+    Interlocked.Exchange(ref SavedDataLastBytes, bytes);
+    Interlocked.Add(ref SavedDataTotalBytes, bytes);
+  }
 
   internal sealed class RuleSource(
     string ruleIdentity, string sourceFile, int ruleEntry, int yamlItem,
@@ -130,6 +173,9 @@ internal static class EwpProfiler
     Allocations = config.Bind(section, "EnableAllocationDiagnostics", false, "Sample global GC counts and approximate heap size at capture boundaries only; NOT per-rule allocation attribution.");
     SpawnProfiling = config.Bind(section, "EnableSpawnProfiling", true, "Track EWP script-created ZDOs with source rule, trace ID and creation phases.");
     AllSpawnEvents = config.Bind(section, "RecordAllSpawnEvents", false, "Record individual events for all EWP spawns instead of only failed attempts. All EWP spawns are always aggregated.");
+    RuleDetailFilter = config.Bind(section, "RuleDetailFilter", "", "Case-insensitive substring of RuleIdentity for selective condition, saved-key and action-stage timings. Empty disables additional rule scopes. Applies on YAML rebuild.");
+    CaptureSlowRootTrees = config.Bind(section, "CaptureSlowRootTrees", false, "Temporarily buffer up to 128 child spans per root and retain up to 120 roots exceeding SlowRootThresholdMs per segment. Diagnostic mode only.");
+    SlowRootThreshold = config.Bind(section, "SlowRootThresholdMs", 50f, "Minimum inclusive root milliseconds for a bounded synchronous span tree.");
   }
 
   private static int InitialGc0, InitialGc1, InitialGc2;
@@ -210,11 +256,17 @@ internal static class EwpProfiler
     {
       if (Running) return false;
       Stats.Clear(); DirectStats.Clear(); SearchStats.Clear(); ChainStats.Clear(); Seconds.Clear(); Slow.Clear(); PlayerMarkers.Clear();
+      RuntimeSeconds.Clear(); SlowRoots.Clear(); DroppedSlowRoots = 0;
+      Markers.Clear(); DroppedMarkers = 0;
+      LastUpdateStart = 0; LastGcSecond = -1;
+      PreviousGc0 = GC.CollectionCount(0); PreviousGc1 = GC.CollectionCount(1); PreviousGc2 = GC.CollectionCount(2);
       SpawnStats.Clear(); SpawnEvents.Clear(); DroppedSpawnEvents = 0; SpawnProfilerErrors = 0;
       SegmentRuleSources.Clear();
       foreach (var source in LoadedRuleSources.Values) SegmentRuleSources[source.VersionKey] = source;
       RuleSourceReloads = 0;
       DroppedChains = 0; DroppedSlow = 0; ScopeOrderErrors = 0;
+      SavedDataIdleChecks = SavedDataCooldownChecks = SavedDataAttempts = SavedDataSuccesses = 0;
+      SavedDataLastEntries = SavedDataLastBytes = SavedDataTotalBytes = 0;
       CaptureGeneration++;
       StartUtc = DateTime.UtcNow;
       StartReason = reason;
@@ -344,6 +396,17 @@ internal static class EwpProfiler
     internal int Generation;
     internal long ChildTicks;
     internal bool Root;
+    internal List<RootSpan>? RootSpans;
+  }
+
+  // Reused per thread; no allocation per root after its first recorded scope.
+  private static List<RootSpan>? PrepareRootSpans(Frame? parent)
+  {
+    if (parent != null) return parent.RootSpans;
+    if (CaptureSlowRootTrees == null || !CaptureSlowRootTrees.Value) return null;
+    var spans = RootScratch ??= new List<RootSpan>(MaxRootSpans);
+    spans.Clear();
+    return spans;
   }
 
   internal readonly struct Scope : IDisposable
@@ -386,7 +449,7 @@ internal static class EwpProfiler
       Parent = parent, Kind = kind, Name = name, Rule = rule.Length > 0 ? rule : parent?.Rule ?? "",
       Trace = trace, Span = id, ParentSpan = parent?.Span ?? 0,
       Origin = origin, Started = Stopwatch.GetTimestamp(), Root = parent == null,
-      Generation = CaptureGeneration
+      Generation = CaptureGeneration, RootSpans = PrepareRootSpans(parent)
     };
     Current = f;
     return new Scope(f);
@@ -417,7 +480,7 @@ internal static class EwpProfiler
       Span = id, Generation = CaptureGeneration,
       Trace = Chains.Value ? (linked ? token.Trace : id) : 0,
       ParentSpan = linked ? token.ParentSpan : (parent?.Span ?? 0),
-      Origin = linked ? token.Origin : ""
+      Origin = linked ? token.Origin : "", RootSpans = PrepareRootSpans(parent)
     };
     Current = f;
     return new Scope(f);
@@ -623,6 +686,20 @@ internal static class EwpProfiler
         t.RootTicks += elapsed; t.RootCalls++;
         if (elapsed > t.MaxTicks) t.MaxTicks = elapsed;
       }
+      // Keep child spans only while their root is running; retain them only for slow roots.
+      if (f.RootSpans != null)
+      {
+        if (!f.Root && f.RootSpans.Count < MaxRootSpans)
+          f.RootSpans.Add(new RootSpan(f.Span, f.ParentSpan, f.Started - CaptureStart,
+            f.Kind, f.Name, f.Rule, elapsed, exclusive));
+        if (f.Root && elapsed >= MsToTicks(SlowRootThreshold.Value))
+        {
+          if (SlowRoots.Count < MaxSlowRoots)
+            SlowRoots.Add(new SlowRootTrace(f.Span, f.Started - CaptureStart, f.Kind, f.Name,
+              f.Rule, elapsed, exclusive, f.RootSpans.Count == MaxRootSpans, f.RootSpans.ToArray()));
+          else DroppedSlowRoots++;
+        }
+      }
       if (elapsed >= MsToTicks(Detailed.Value ? SlowMs.Value / 4d : SlowMs.Value))
       {
         if (Slow.Count < MaxSlow)
@@ -711,6 +788,108 @@ internal static class EwpProfiler
       Uid = uid; Source = source; Rule = rule; Origin = origin; Trace = trace; Span = span;
       Parent = parent; Delay = delay; TriggerRules = triggerRules; Position = position; Revision = revision; Owner = owner; }
   }
+  private readonly struct RootSpan(long id, long parent, long started, string kind,
+    string name, string rule, long inclusive, long exclusive)
+  {
+    internal long Id { get; } = id;
+    internal long Parent { get; } = parent;
+    internal long Started { get; } = started;
+    internal string Kind { get; } = kind;
+    internal string Name { get; } = name;
+    internal string Rule { get; } = rule;
+    internal long Inclusive { get; } = inclusive;
+    internal long Exclusive { get; } = exclusive;
+  }
+  private sealed class SlowRootTrace(long id, long started, string kind, string name,
+    string rule, long inclusive, long exclusive, bool truncated, RootSpan[] children)
+  {
+    internal long Id { get; } = id;
+    internal long Started { get; } = started;
+    internal string Kind { get; } = kind;
+    internal string Name { get; } = name;
+    internal string Rule { get; } = rule;
+    internal long Inclusive { get; } = inclusive;
+    internal long Exclusive { get; } = exclusive;
+    internal bool Truncated { get; } = truncated;
+    internal RootSpan[] Children { get; } = children;
+  }
+  private readonly struct ProfilerMarker(DateTime utc, long elapsedTicks, string label)
+  {
+    internal DateTime Utc { get; } = utc;
+    internal long ElapsedTicks { get; } = elapsedTicks;
+    internal string Label { get; } = label;
+  }
+
+  internal static bool Mark(string label)
+  {
+    if (!Running || string.IsNullOrWhiteSpace(label)) return false;
+    var stamp = DateTime.UtcNow;
+    var tick = Stopwatch.GetTimestamp();
+    lock (Sync)
+    {
+      if (!Running) return false;
+      if (Markers.Count == MaxMarkers) { DroppedMarkers++; return false; }
+      Markers.Add(new ProfilerMarker(stamp, tick - CaptureStart,
+        label.Trim().Substring(0, Math.Min(120, label.Trim().Length))));
+      return true;
+    }
+  }
+
+  private sealed class RuntimeRow
+  {
+    internal readonly Totals Updates = new();
+    internal readonly Totals PokeDelay = new();
+    internal long MaxUpdateInterval, PokeCount, RestoredPokes;
+    internal long Gc0, Gc1, Gc2;
+    internal int Peers = -1, QueueDepth = -1;
+  }
+  private static RuntimeRow RuntimeAt(long at)
+  {
+    var second = Math.Max(0, (at - CaptureStart) / Stopwatch.Frequency);
+    if (!RuntimeSeconds.TryGetValue(second, out var row)) RuntimeSeconds[second] = row = new RuntimeRow();
+    return row;
+  }
+
+  // EWP LateUpdate duration and call-start interval, not whole Unity frame time.
+  internal static void RecordUpdate(long started, long ended)
+  {
+    if (!Running || started < CaptureStart) return;
+    lock (Sync)
+    {
+      if (!Running || started < CaptureStart) return;
+      var row = RuntimeAt(ended);
+      row.Updates.Add(Math.Max(0, ended - started), 0);
+      if (LastUpdateStart > 0)
+        row.MaxUpdateInterval = Math.Max(row.MaxUpdateInterval, Math.Max(0, started - LastUpdateStart));
+      LastUpdateStart = started;
+      var second = Math.Max(0, (ended - CaptureStart) / Stopwatch.Frequency);
+      if (second != LastGcSecond)
+      {
+        int a = GC.CollectionCount(0), b = GC.CollectionCount(1), c = GC.CollectionCount(2);
+        row.Gc0 += Math.Max(0, a - PreviousGc0);
+        row.Gc1 += Math.Max(0, b - PreviousGc1);
+        row.Gc2 += Math.Max(0, c - PreviousGc2);
+        PreviousGc0 = a; PreviousGc1 = b; PreviousGc2 = c;
+        LastGcSecond = second;
+        try { row.Peers = ZNet.instance != null && ZNet.instance.IsServer() ? ZNet.instance.GetPeers().Count : -1; }
+        catch { row.Peers = -1; }
+        row.QueueDepth = PokeTimers.PendingCount;
+      }
+    }
+  }
+  internal static void RecordPokeDispatch(double lateness, bool restored)
+  {
+    if (!Running) return;
+    lock (Sync)
+    {
+      if (!Running) return;
+      var row = RuntimeAt(Stopwatch.GetTimestamp());
+      row.PokeCount++;
+      if (restored) row.RestoredPokes++;
+      row.PokeDelay.Add(MsToTicks(Math.Max(0, lateness) * 1000d), 0);
+    }
+  }
+
   private sealed class PhaseTotals { internal long Count, Total, Maximum; }
   private sealed class Timeline
   {
@@ -744,7 +923,7 @@ internal static class EwpProfiler
     var searches = SearchStats.ToArray();
     var chains = ChainStats.Values.ToArray();
     var lines = new List<string> {
-      "EWP internal profiler 1.12 — instrumented wall-clock, NOT actual thread CPU time",
+      "EWP internal profiler 1.13 — instrumented wall-clock, NOT actual thread CPU time",
       "EWP source version: " + EWP.VERSION,
       "DevAssistant export interface: contract=1, capabilities=1, thread-safe session epoch (role compatibility protocol 176 not asserted)",
       "UTC start: " + StartUtc.ToString("O", Invariant),
@@ -762,8 +941,15 @@ internal static class EwpProfiler
       "Output directory: " + path,
       "Measured scopes: " + stats.Sum(s => s.Value.Count),
       "Search groups: " + searches.Length + "; search calls: " + searches.Sum(s => s.Value.Count),
+      "Saved-data: idle checks=" + SavedDataIdleChecks + "; cooldown checks=" + SavedDataCooldownChecks +
+        "; write attempts=" + SavedDataAttempts + "; completed=" + SavedDataSuccesses +
+        "; last database entries=" + SavedDataLastEntries + "; last UTF-8 bytes=" + SavedDataLastBytes +
+        "; total written UTF-8 bytes=" + SavedDataTotalBytes,
       "Trace chains: " + chains.Length + "; dropped chain-record attempts: " + DroppedChains,
       "Slow events retained: " + Slow.Count + "; dropped: " + DroppedSlow,
+      "Slow roots retained: " + SlowRoots.Count + "; dropped by segment limit: " + DroppedSlowRoots +
+        "; max child spans per root: " + MaxRootSpans,
+      "Manual marks retained: " + Markers.Count + "; dropped: " + DroppedMarkers,
       "Spawn groups: " + SpawnStats.Count + "; retained individual events: " + SpawnEvents.Count + "; dropped: " + DroppedSpawnEvents + "; profiler errors: " + SpawnProfilerErrors,
       "Individual spawn events: failed attempts by default, or all EWP spawns when RecordAllSpawnEvents is enabled. Vanilla spawns are not attributed.",
       "Player lifecycle markers: " + PlayerMarkers.Count + " (joins: " + PlayerMarkers.Count(m => m.Kind == "join") + ", leaves: " + PlayerMarkers.Count(m => m.Kind == "leave") + ")",
@@ -867,6 +1053,37 @@ internal static class EwpProfiler
     foreach (var e in Slow.OrderByDescending(x => x.Total))
       slowRows.Add(Num(e.At / (double)Stopwatch.Frequency) + "\t" + Clean(e.Kind) + "\t" + Clean(e.Name) + "\t" + Clean(e.Rule) + "\t" + e.Trace + "\t" + e.Span + "\t" + e.Parent + "\t" + Num(Ms(e.Total)) + "\t" + Num(Ms(e.Exclusive)));
     Write("ProfilerSlowEvents.tsv", slowRows);
+    var roots = new List<string> { "RootSpanID\tSpanID\tParentSpanID\tStartSeconds\tKind\tIdentity\tRuleContext\tInclusiveMs\tExclusiveMs\tTruncated" };
+    foreach (var root in SlowRoots)
+    {
+      roots.Add(root.Id + "\t" + root.Id + "\t0\t" + Num(root.Started / (double)Stopwatch.Frequency) +
+        "\t" + Clean(root.Kind) + "\t" + Clean(root.Name) + "\t" + Clean(root.Rule) +
+        "\t" + Num(Ms(root.Inclusive)) + "\t" + Num(Ms(root.Exclusive)) + "\t" + (root.Truncated ? "1" : "0"));
+      foreach (var child in root.Children.OrderBy(x => x.Started))
+        roots.Add(root.Id + "\t" + child.Id + "\t" + child.Parent + "\t" +
+          Num(child.Started / (double)Stopwatch.Frequency) + "\t" + Clean(child.Kind) + "\t" +
+          Clean(child.Name) + "\t" + Clean(child.Rule) + "\t" +
+          Num(Ms(child.Inclusive)) + "\t" + Num(Ms(child.Exclusive)) + "\t0");
+    }
+    Write("ProfilerSlowRoots.tsv", roots);
+    var runtimeRows = new List<string> { "SecondSinceStart\tUpdates\tEwpLateUpdateTotalMs\tEwpLateUpdateAverageMs\tEwpLateUpdateMaxMs\tEwpLateUpdateP95BucketLowerMs\tEwpLateUpdateP99BucketLowerMs\tMaxUpdateStartIntervalMs\tGC0Delta\tGC1Delta\tGC2Delta\tConnectedPeers\tPokeQueueDepth\tPokeDispatches\tRestoredPokeDispatches\tPokeLatenessMaxMs\tPokeLatenessP95BucketLowerMs" };
+    foreach (var pair in RuntimeSeconds)
+    {
+      var row = pair.Value;
+      runtimeRows.Add(pair.Key + "\t" + row.Updates.Count + "\t" + Num(Ms(row.Updates.Inclusive)) +
+        "\t" + Num(row.Updates.Count == 0 ? 0 : Ms(row.Updates.Inclusive) / row.Updates.Count) +
+        "\t" + Num(Ms(row.Updates.Max)) + "\t" + row.Updates.Percentile(.95) +
+        "\t" + row.Updates.Percentile(.99) + "\t" + Num(Ms(row.MaxUpdateInterval)) +
+        "\t" + row.Gc0 + "\t" + row.Gc1 + "\t" + row.Gc2 + "\t" +
+        row.Peers + "\t" + row.QueueDepth + "\t" + row.PokeCount + "\t" +
+        row.RestoredPokes + "\t" + Num(Ms(row.PokeDelay.Max)) + "\t" + row.PokeDelay.Percentile(.95));
+    }
+    Write("ProfilerRuntime.tsv", runtimeRows);
+    var manualMarks = new List<string> { "SecondSinceStart\tUtcTime\tGermanyTime\tLabel" };
+    foreach (var mark in Markers)
+      manualMarks.Add(Num(mark.ElapsedTicks / (double)Stopwatch.Frequency) + "\t" +
+        mark.Utc.ToString("O", Invariant) + "\t" + GermanTime(mark.Utc).ToString("O", Invariant) + "\t" + Clean(mark.Label));
+    Write("ProfilerMarkers.tsv", manualMarks);
     var markerRows = new List<string> { "Event\tJoinOrdinal\tPlayerZdo\tElapsedMs\tSecondSinceStart\tUtcTime\tGermanyTime" };
     foreach (var m in PlayerMarkers)
       markerRows.Add(m.Kind + "\t" + m.Ordinal + "\t" + Clean(m.PlayerZdo) + "\t" + Num(Ms(m.SinceStartTicks)) + "\t" + m.Second + "\t" + m.Utc.ToString("O", Invariant) + "\t" + GermanTime(m.Utc).ToString("O", Invariant));

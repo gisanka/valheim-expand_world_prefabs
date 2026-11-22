@@ -43,6 +43,7 @@ public class Loading
         foreach (var rule in FromData(entries[index]))
         {
           rule.ProfilerKey = file + "#entry=" + (index + 1) + "|" + rule.Type + "|" + rule.Prefabs + "|" + string.Join(" ", rule.Args);
+          rule.ProfileDetails = EwpProfiler.ShouldProfileRuleDetails(rule.ProfilerKey);
           items.Add(rule);
           if (parsed != null && index < parsed.ScriptSources.Count)
           {
