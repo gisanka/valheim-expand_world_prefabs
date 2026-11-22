@@ -12,8 +12,9 @@ public static class PokeTimers
 {
   private const int Format = 2;
   private static readonly int StorageHash = ZdoHelper.Hash("ewp_pending_pokes");
-  private sealed class Entry(ZDOID id, double due, string[] args)
+  private sealed class Entry(ZDOID id, double due, string[] args, EwpProfiler.TraceToken trace = default)
   {
+    internal readonly EwpProfiler.TraceToken Trace = trace;
     internal readonly ZDOID Id = id;
     internal readonly double Due = due;
     internal readonly string[] Args = args;
@@ -51,19 +52,23 @@ public static class PokeTimers
       Log.Warning("Skipped delayed poke with a non-finite delay.");
       return;
     }
+    var trace = EwpProfiler.CaptureTrace();
+    var queued = 0;
     for (var i = 0; i < targets.Length; i++)
     {
       try
       {
         var target = ZDOMan.instance.GetZDO(targets[i]);
         if (target == null) continue;
-        Insert(new Entry(target.m_uid, ZNet.instance.m_netTime + delay, args));
+        Insert(new Entry(target.m_uid, ZNet.instance.m_netTime + delay, args, trace));
+        queued++;
       }
       catch (ArgumentOutOfRangeException)
       {
         Log.Warning("Skipped delayed poke with an invalid target ID.");
       }
     }
+    EwpProfiler.Queued(queued);
   }
 
   private static void Remove(Entry entry)
@@ -90,7 +95,10 @@ public static class PokeTimers
         // Consume before dispatch: a throwing recipient must not replay earlier recipients.
         Remove(entry);
         if (ZDOMan.instance.GetZDO(entry.Id) != null)
+        {
+          using var profiling = EwpProfiler.BeginDeferred(entry.Trace, entry.Args.Length > 0 ? entry.Args[0] : "");
           Manager.Handle(ActionType.Poke, entry.Args, entry.Id);
+        }
         return null;
       });
     }

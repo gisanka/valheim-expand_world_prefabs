@@ -8,6 +8,7 @@ namespace ExpandWorld.Prefab;
 
 public class Object
 {
+  internal readonly string ProfilerFilter;
   private readonly IPrefabValue PrefabsValue;
   private readonly bool HasPrefabFilter;
   private readonly IPrefabValue? ExcludedPrefabsValue;
@@ -24,6 +25,9 @@ public class Object
 
   public Object(ObjectYaml data)
   {
+    ProfilerFilter = "prefab=" + data.prefab + ";exclude=" + data.excludePrefab
+      + ";maxDistance=" + (data.maxDistance ?? "100") + ";maxHeight=" + (data.maxHeight ?? "")
+      + ";condition=" + (data.condition ?? "") + ";filters=" + string.Join(",", data.filters ?? []);
 
     HasPrefabFilter = !string.IsNullOrWhiteSpace(data.prefab);
     PrefabsValue = DataValue.Prefab(data.prefab);

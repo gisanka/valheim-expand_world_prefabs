@@ -121,7 +121,7 @@ public class InfoManager
 
     var requiredStates = GetRequiredStates();
     var requiredClientStates = GetRequiredClientStates();
-    var shouldHandleCreated = canPatch && (shouldNpcPlayerList || CreateDatas.Exists || requiredStates.Contains("join") || requiredStates.Contains("respawn"));
+    var shouldHandleCreated = canPatch && (shouldNpcPlayerList || CreateDatas.Exists || requiredStates.Contains("join") || requiredStates.Contains("respawn") || EwpProfiler.ShouldCaptureJoin);
     var shouldHandleDestroyed = canPatch && (shouldNpcPlayerList || RemoveDatas.Exists);
     var shouldHandleRpc = canPatch && (StateDatas.Exists || SayDatas.Exists);
     var shouldHandleClientRpc = canPatch && ClientStateDatas.Exists;
@@ -131,7 +131,7 @@ public class InfoManager
     var shouldTrackChanges = canPatch && ChangeDatas.Exists;
     var shouldTrackTime = canPatch && TimeDatas.Exists;
     var shouldTrackRealTime = canPatch && RealTimeDatas.Exists;
-    var shouldHandlePeerState = canPatch && (requiredStates.Contains("join") || requiredStates.Contains("respawn") || requiredStates.Contains("leave"));
+    var shouldHandlePeerState = canPatch && (requiredStates.Contains("join") || requiredStates.Contains("respawn") || requiredStates.Contains("leave") || EwpProfiler.ShouldCaptureJoin);
     var shouldHandleSwapConnections = canPatch && RequiresConnectionSwapTracking();
 
     HandleCreated.Patch(EWP.Harmony, shouldHandleCreated);

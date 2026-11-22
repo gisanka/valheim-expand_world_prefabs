@@ -33,6 +33,7 @@ public class DelayedPoke
 {
   public static void Add(Poke poke, ZDOID zdo, Vector3 pos, Quaternion rot, Functions f)
   {
+    using var profiling = EwpProfiler.Begin("poke-add", poke.Filter.ProfilerFilter);
     var chance = poke.Chance?.Get(f) ?? 1f;
     if (chance < 1f && Random.value > chance)
       return;
@@ -88,6 +89,7 @@ public class DelayedPoke
   }
   public static void AddGlobal(Poke poke, Vector3 pos, Quaternion rot, Functions f)
   {
+    using var profiling = EwpProfiler.Begin("poke-add-global", poke.Filter.ProfilerFilter);
     var chance = poke.Chance?.Get(f) ?? 1f;
     if (chance < 1f && Random.value > chance)
       return;
@@ -115,6 +117,7 @@ public class DelayedPoke
   }
   public static void Add(float delay, ZDOID[] zdos, string[] args)
   {
+    if (delay <= 0f) EwpProfiler.Queued(zdos.Length);
     if (delay <= 0f)
       Poke(zdos, args);
     else
@@ -124,11 +127,13 @@ public class DelayedPoke
 
   protected static void Poke(ZDOID[] zdos, string[] args)
   {
+    using var profiling = EwpProfiler.Begin("poke-dispatch", args.Length > 0 ? args[0] : "");
     foreach (var z in zdos)
       Manager.Handle(ActionType.Poke, args, z);
   }
   protected static void Poke(ZDOID zdo, string[] args)
   {
+    using var profiling = EwpProfiler.Begin("poke-dispatch", args.Length > 0 ? args[0] : "");
     Manager.Handle(ActionType.Poke, args, zdo);
   }
 }

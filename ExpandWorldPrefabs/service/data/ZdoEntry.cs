@@ -58,7 +58,9 @@ public class ZdoEntry : ResolvedDataEntry
   {
     var zdo = SpawnZDO(Prefab, Position ?? Vector3.zero, Rotation ?? Vector3.zero);
     if (zdo == null) return null;
+    EwpProfiler.RecordSpawn("zdo-created", Prefab, zdo, "", -1, null);
     Write(zdo);
+    EwpProfiler.RecordSpawn("data-written", Prefab, zdo, "", -1, null);
     RestoreScale.Check(zdo);
     DelayedOwner.Check(zdo, Owner);
     return zdo;
@@ -70,6 +72,7 @@ public class ZdoEntry : ResolvedDataEntry
   {
     var zdo = SpawnZDO(prefab, position, rotation);
     if (zdo == null) return null;
+    EwpProfiler.RecordSpawn("zdo-created", prefab, zdo, "", -1, null);
     RestoreScale.Check(zdo);
     DelayedOwner.Check(zdo, owner);
     return zdo;

@@ -267,7 +267,9 @@ internal static class RuleLogChecks
       Check(sink.Entered.Wait(2000), "shutdown stall");
       worker.TryWrite(new RuleLogSource("abandon-after-deadline"), "", Echo);
       var clock = Stopwatch.StartNew();
-      Check(!worker.Stop(30), "stalled shutdown should time out");
+      // Join(timeout) can return before the Stopwatch deadline. Use an expired
+      // budget so releasing the sink cannot race with that deadline.
+      Check(!worker.Stop(0), "stalled shutdown should time out");
       Check(clock.ElapsedMilliseconds < 500 && sink.Closes == 0, "no forced close on producer thread");
       Check(!worker.TryWrite(new RuleLogSource("late"), "", Echo), "no writes after stop");
     }

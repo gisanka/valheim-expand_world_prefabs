@@ -111,6 +111,7 @@ public static class FileLoading
   public static void ReloadAll()
   {
     if (ExpandWorld.Prefab.Helper.IsClient()) return;
+    using var profile = ExpandWorld.Prefab.EwpProfiler.Begin("yaml-reload", "FileLoading.ReloadAll");
     EnsurePrefabFile();
     Cache.Clear();
     var changes = Changes.TakeAll();
@@ -127,6 +128,7 @@ public static class FileLoading
 
   private static bool OnChanges(YamlChanges changes)
   {
+    using var profile = ExpandWorld.Prefab.EwpProfiler.Begin("yaml-reload", "FileLoading.OnChanges");
     try
     {
       var (modified, prefabs) = StoreChanges(changes, true);

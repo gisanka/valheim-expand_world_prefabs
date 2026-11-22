@@ -4,8 +4,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>preview</LangVersion>
     <nullable>enable</nullable>
+    <!-- The profiler script overrides this to an isolated reference folder. -->
+    <LibsDir Condition="'$(EwpLibsDirectory)' != ''">$(EwpLibsDirectory)\</LibsDir>
+    <ManagedDir Condition="'$(EwpLibsDirectory)' != ''">$(EwpLibsDirectory)\</ManagedDir>
+    <BepInExDir Condition="'$(EwpLibsDirectory)' != ''">$(EwpLibsDirectory)\</BepInExDir>
+    <AlwaysUseLibsDir Condition="'$(EwpLibsDirectory)' != ''">true</AlwaysUseLibsDir>
   </PropertyGroup>
-  <Target Name="CopyDLL" AfterTargets="Build">
+  <Target Name="CopyDLL" AfterTargets="Build" Condition="'$(EwpSkipCopyDll)' != 'true'">
     <Copy SourceFiles="$(TargetDir)$(ProjectName).dll" DestinationFolder="$(LibsDir)" />
     <Message Text="Copied to Libs folder." Importance="High" />
   </Target>

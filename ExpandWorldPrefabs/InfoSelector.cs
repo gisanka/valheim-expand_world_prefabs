@@ -107,11 +107,11 @@ public class InfoSelector
     }
     if (checkObjects)
     {
-      linq = [.. linq.Where(d => d.Objects == null || ObjectsFiltering.HasNearby(d.ObjectsLimit, d.Objects, zdo, f))];
+      linq = [.. linq.Where(d => CheckRequiredObjects(d, zdo, f))];
     }
     if (checkBannedObjects)
     {
-      linq = [.. linq.Where(d => d.BannedObjects == null || ObjectsFiltering.HasNotNearby(d.BannedObjectsLimit, d.BannedObjects, zdo, f))];
+      linq = [.. linq.Where(d => CheckBannedObjects(d, zdo, f))];
     }
     if (checkAdmin)
     {
@@ -154,6 +154,21 @@ public class InfoSelector
     Rule[] result = [.. linq];
     return result.Length == 0 ? null : result;
   }
+  private static bool CheckRequiredObjects(Rule rule, ZDO zdo, Functions f)
+  {
+    if (rule.Objects == null) return true;
+    if (!EwpProfiler.Active) return ObjectsFiltering.HasNearby(rule.ObjectsLimit, rule.Objects, zdo, f);
+    using var scope = EwpProfiler.Begin("rule-condition-objects", rule.ProfilerKey, rule.ProfilerKey);
+    return ObjectsFiltering.HasNearby(rule.ObjectsLimit, rule.Objects, zdo, f);
+  }
+  private static bool CheckBannedObjects(Rule rule, ZDO zdo, Functions f)
+  {
+    if (rule.BannedObjects == null) return true;
+    if (!EwpProfiler.Active) return ObjectsFiltering.HasNotNearby(rule.BannedObjectsLimit, rule.BannedObjects, zdo, f);
+    using var scope = EwpProfiler.Begin("rule-condition-excluded", rule.ProfilerKey, rule.ProfilerKey);
+    return ObjectsFiltering.HasNotNearby(rule.BannedObjectsLimit, rule.BannedObjects, zdo, f);
+  }
+
   private static bool CheckGroups(Rule d, string pid, long cid)
   {
     if (d.BannedGroups != null && d.BannedGroups.Any(group => Api.IsInGroup(pid, cid, group))) return false;

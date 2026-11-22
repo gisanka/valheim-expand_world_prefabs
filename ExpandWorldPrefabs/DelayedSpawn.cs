@@ -9,13 +9,21 @@ public class DelayedSpawn(double due, ZdoEntry zdoEntry, bool triggerRules, floa
 
   public static void Clear() => Spawns.Clear();
 
-  public static ZDO? CreateObject(ZdoEntry entry, bool triggerRules)
+  public static ZDO? CreateObject(ZdoEntry entry, bool triggerRules, string sourceZdo = "", float plannedDelay = 0f)
   {
     var previousSkip = HandleCreated.Skip;
     HandleCreated.Skip = !triggerRules;
     try
     {
-      return entry.Create();
+      using var profiling = EwpProfiler.Begin("spawn-create", EwpProfiler.SpawnActive ? entry.Prefab.ToString() : "");
+      var created = entry.Create();
+      EwpProfiler.RecordSpawn(created != null ? "created-ready" : "failed", entry.Prefab, created, sourceZdo, plannedDelay, triggerRules);
+      return created;
+    }
+    catch
+    {
+      EwpProfiler.RecordSpawn("create-exception-outcome-unknown", entry.Prefab, null, sourceZdo, plannedDelay, triggerRules);
+      throw;
     }
     finally
     {
@@ -81,7 +89,8 @@ public class DelayedSpawn(double due, ZdoEntry zdoEntry, bool triggerRules, floa
     var connect = spawn.Connect?.Get(f);
     if (connect.HasValue && connect.Value != ZDOID.None)
       SupportAttach.Connect(zdoEntry, connect.Value);
-    Add(delay, zdoEntry, spawn.TriggerRules?.GetBool(f) ?? false, removeDelay);
+    Add(delay, zdoEntry, spawn.TriggerRules?.GetBool(f) ?? false, removeDelay,
+      EwpProfiler.SpawnActive ? originalZdo.m_uid.ToString() : "");
   }
   // Real prefabs take priority over blueprints with the same name.
   private static bool TryGetBlueprint(int prefab, out Blueprint blueprint)
@@ -169,17 +178,20 @@ public class DelayedSpawn(double due, ZdoEntry zdoEntry, bool triggerRules, floa
     return result;
   }
 
-  private static void Add(float delay, ZdoEntry zdoEntry, bool triggerRules, float? removeDelay)
+  private static void Add(float delay, ZdoEntry zdoEntry, bool triggerRules, float? removeDelay, string sourceZdo = "")
   {
     if (delay <= 0f)
     {
-      var zdo = CreateObject(zdoEntry, triggerRules);
+      EwpProfiler.RecordSpawn("immediate", zdoEntry.Prefab, null, sourceZdo, delay, triggerRules);
+      var zdo = CreateObject(zdoEntry, triggerRules, sourceZdo, delay);
       if (zdo != null && removeDelay.HasValue)
         DelayedRemove.Add(removeDelay.Value, zdo.m_uid, triggerRules);
       return;
     }
     var due = ZNet.instance.m_netTime + delay;
-    var spawn = new DelayedSpawn(due, zdoEntry, triggerRules, removeDelay);
+    var spawn = new DelayedSpawn(due, zdoEntry, triggerRules, removeDelay)
+      { Token = EwpProfiler.CaptureTrace(), SourceZdo = sourceZdo, PlannedDelay = delay };
+    EwpProfiler.RecordSpawn("scheduled", zdoEntry.Prefab, null, sourceZdo, delay, triggerRules);
     Spawns.Add(spawn.Due, spawn);
   }
   public static void Execute() => Spawns.Drain(ZNet.instance.m_netTime, static spawn =>
@@ -191,10 +203,16 @@ public class DelayedSpawn(double due, ZdoEntry zdoEntry, bool triggerRules, floa
   private readonly ZdoEntry ZdoEntry = zdoEntry;
   private readonly bool TriggerRules = triggerRules;
   private readonly float? RemoveDelay = removeDelay;
+  private EwpProfiler.TraceToken Token;
+  private string SourceZdo = "";
+  private float PlannedDelay;
 
   private void ExecuteAction()
   {
-    var zdo = CreateObject(ZdoEntry, TriggerRules);
+    using var profiling = EwpProfiler.BeginDeferredSpawn(Token, "spawn-" + ZdoEntry.Prefab);
+    EwpProfiler.RecordSpawn("due", ZdoEntry.Prefab, null, SourceZdo, PlannedDelay, TriggerRules);
+    var zdo = CreateObject(ZdoEntry, TriggerRules, SourceZdo, PlannedDelay);
+    if (zdo != null) EwpProfiler.RecordSpawn("delayed-completed", ZdoEntry.Prefab, zdo, SourceZdo, PlannedDelay, TriggerRules);
     if (zdo != null && RemoveDelay.HasValue)
       DelayedRemove.Add(RemoveDelay.Value, zdo.m_uid, TriggerRules);
   }

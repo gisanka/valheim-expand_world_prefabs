@@ -76,6 +76,8 @@ public class PeerManager
   {
     RemoveCachedPeer(peer.m_uid, peer);
     PeerIds.Remove(peer);
+    // Record the disconnect even when Valheim already removed the player ZDO.
+    if (HandledPeers.Contains(peer)) EwpProfiler.PlayerLeft(peer.m_characterID.ToString());
     HandledPeers.Remove(peer);
     var zdo = ZDOMan.instance.GetZDO(peer.m_characterID);
     if (zdo == null) return;
@@ -98,6 +100,7 @@ public class PeerManager
     else
     {
       HandledPeers.Add(peer);
+      EwpProfiler.PlayerJoined(zdo.m_uid.ToString());
       Manager.Handle(ActionType.State, ["join"], zdo);
     }
   }

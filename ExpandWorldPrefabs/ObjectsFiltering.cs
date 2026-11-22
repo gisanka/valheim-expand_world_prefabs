@@ -16,50 +16,72 @@ public class ObjectsFiltering
     if (objects.Length == 0) return [];
     foreach (var o in objects) o.Roll(f, pos, rot);
     var maxRadius = objects.Max(o => o.MaxDistance);
+    using var search = EwpProfiler.BeginSearch("GetNearby[array]", EwpProfiler.SearchActive ? string.Join(" || ", objects.Select(o => o.ProfilerFilter)) : "", maxRadius, maxRadius > 10000);
+    ZDOID[] results;
     if (maxRadius > 10000)
     {
       var zdos = ZDOMan.instance.m_objectsByID.Values;
-      return GetObjects(limit, zdos, objects, f, self, random);
+      results = GetObjects(limit, zdos, objects, f, self, random, search);
     }
-    var zdoLists = GetSectorIndices(objects);
-    return GetObjects(limit, zdoLists, objects, f, self, random);
+    else
+    {
+      var zdoLists = GetSectorIndices(objects);
+      results = GetObjects(limit, zdoLists, objects, f, self, random, search);
+    }
+    if (search != null) search.Returned = results.Length;
+    return results;
   }
   public static ZDOID[] GetNearby(int limit, Object objects, Vector3 pos, Quaternion rot, Functions f, ZDOID? self, bool random)
   {
     objects.Roll(f, pos, rot);
     var maxRadius = objects.MaxDistance;
+    using var search = EwpProfiler.BeginSearch("GetNearby[single]", EwpProfiler.SearchActive ? objects.ProfilerFilter : "", maxRadius, maxRadius > 10000);
+    ZDOID[] results;
     if (maxRadius > 10000)
     {
       var zdos = ZDOMan.instance.m_objectsByID.Values;
-      return GetObjects(limit, zdos, objects, f, self, random);
+      results = GetObjects(limit, zdos, objects, f, self, random, search);
     }
-    var zdoLists = GetSectorIndices(objects);
-    return GetObjects(limit, zdoLists, objects, f, self, random);
+    else
+    {
+      var zdoLists = GetSectorIndices(objects);
+      results = GetObjects(limit, zdoLists, objects, f, self, random, search);
+    }
+    if (search != null) search.Returned = results.Length;
+    return results;
   }
-  private static ZDOID[] GetObjects(int limit, List<List<ZDO>> zdoLists, Object objects, Functions f, ZDOID? self, bool random)
+  private static ZDOID[] GetObjects(int limit, List<List<ZDO>> zdoLists, Object objects, Functions f, ZDOID? self, bool random, EwpProfiler.SearchContext? search)
   {
-    var query = zdoLists.SelectMany(z => z).Where(z => objects.IsValid(z, f, self));
+    var query = search == null
+      ? zdoLists.SelectMany(z => z).Where(z => objects.IsValid(z, f, self))
+      : zdoLists.SelectMany(z => z).Where(z => EwpProfiler.Inspect(search, objects.IsValid(z, f, self)));
     if (limit > 0)
       query = random ? query.OrderBy(_ => Random.value).Take(limit) : query.OrderBy(z => Utils.DistanceXZ(z.m_position, objects.CachedPosition)).Take(limit);
     return [.. query.Select(z => z.m_uid)];
   }
-  private static ZDOID[] GetObjects(int limit, Dictionary<ZDOID, ZDO>.ValueCollection zdos, Object objects, Functions f, ZDOID? self, bool random)
+  private static ZDOID[] GetObjects(int limit, Dictionary<ZDOID, ZDO>.ValueCollection zdos, Object objects, Functions f, ZDOID? self, bool random, EwpProfiler.SearchContext? search)
   {
-    var query = zdos.Where(z => objects.IsValid(z, f, self));
+    var query = search == null
+      ? zdos.Where(z => objects.IsValid(z, f, self))
+      : zdos.Where(z => EwpProfiler.Inspect(search, objects.IsValid(z, f, self)));
     if (limit > 0)
       query = random ? query.OrderBy(_ => Random.value).Take(limit) : query.OrderBy(z => Utils.DistanceXZ(z.m_position, objects.CachedPosition)).Take(limit);
     return [.. query.Select(z => z.m_uid)];
   }
-  private static ZDOID[] GetObjects(int limit, List<List<ZDO>> zdoLists, Object[] objects, Functions f, ZDOID? self, bool random)
+  private static ZDOID[] GetObjects(int limit, List<List<ZDO>> zdoLists, Object[] objects, Functions f, ZDOID? self, bool random, EwpProfiler.SearchContext? search)
   {
-    var query = zdoLists.SelectMany(z => z).Where(z => objects.Any(o => o.IsValid(z, f, self)));
+    var query = search == null
+      ? zdoLists.SelectMany(z => z).Where(z => objects.Any(o => o.IsValid(z, f, self)))
+      : zdoLists.SelectMany(z => z).Where(z => EwpProfiler.Inspect(search, objects.Any(o => o.IsValid(z, f, self))));
     if (limit > 0)
       query = random ? query.OrderBy(_ => Random.value).Take(limit) : query.OrderBy(z => Utils.DistanceXZ(z.m_position, objects[0].CachedPosition)).Take(limit);
     return [.. query.Select(z => z.m_uid)];
   }
-  private static ZDOID[] GetObjects(int limit, Dictionary<ZDOID, ZDO>.ValueCollection zdos, Object[] objects, Functions f, ZDOID? self, bool random)
+  private static ZDOID[] GetObjects(int limit, Dictionary<ZDOID, ZDO>.ValueCollection zdos, Object[] objects, Functions f, ZDOID? self, bool random, EwpProfiler.SearchContext? search)
   {
-    var query = zdos.Where(z => objects.Any(o => o.IsValid(z, f, self)));
+    var query = search == null
+      ? zdos.Where(z => objects.Any(o => o.IsValid(z, f, self)))
+      : zdos.Where(z => EwpProfiler.Inspect(search, objects.Any(o => o.IsValid(z, f, self))));
     if (limit > 0)
       query = random ? query.OrderBy(_ => Random.value).Take(limit) : query.OrderBy(z => Utils.DistanceXZ(z.m_position, objects[0].CachedPosition)).Take(limit);
     return [.. query.Select(z => z.m_uid)];
@@ -73,39 +95,42 @@ public class ObjectsFiltering
     foreach (var o in objects) o.Roll(f, zdo.m_position, zdo.GetRotation());
     var l = limit?.Get(f);
     var maxRadius = objects.Max(o => o.MaxDistance);
+    using var search = EwpProfiler.BeginSearch("HasNearby", EwpProfiler.SearchActive ? string.Join(" || ", objects.Select(o => o.ProfilerFilter)) : "", maxRadius, maxRadius > 10000);
     if (maxRadius > 10000)
     {
       var zdos = ZDOMan.instance.m_objectsByID.Values;
       if (l == null)
-        return HasAllObjects(zdos, objects, zdo.m_uid, f);
+        return EwpProfiler.SearchResult(search, HasAllObjects(zdos, objects, zdo.m_uid, f, search));
       else
-        return HasLimitObjects(zdos, l, objects, zdo.m_uid, f);
+        return EwpProfiler.SearchResult(search, HasLimitObjects(zdos, l, objects, zdo.m_uid, f, search));
     }
     var zdoLists = GetSectorIndices(objects);
     if (l == null)
-      return HasAllObjects(zdoLists, objects, zdo.m_uid, f);
+      return EwpProfiler.SearchResult(search, HasAllObjects(zdoLists, objects, zdo.m_uid, f, search));
     else
-      return HasLimitObjects(zdoLists, l, objects, zdo.m_uid, f);
+      return EwpProfiler.SearchResult(search, HasLimitObjects(zdoLists, l, objects, zdo.m_uid, f, search));
   }
   public static bool HasNotNearby(IRangeIntValue? limit, Object[] objects, ZDO zdo, Functions f)
   {
     if (objects.Length == 0) return true;
     foreach (var o in objects) o.Roll(f, zdo.m_position, zdo.GetRotation());
     var l = limit?.Get(f);
+    var maxRadius = objects.Max(o => o.MaxDistance);
+    using var search = EwpProfiler.BeginSearch("HasNotNearby", EwpProfiler.SearchActive ? string.Join(" || ", objects.Select(o => o.ProfilerFilter)) : "", maxRadius, maxRadius > 10000);
     // Match the broad-search strategy used by HasNearby and GetNearby.
     // Large absence checks must not enumerate a square of empty sectors.
-    if (objects.Max(o => o.MaxDistance) > 10000)
+    if (maxRadius > 10000)
     {
       var zdos = ZDOMan.instance.m_objectsByID.Values;
-      return l == null
-        ? !HasAllObjects(zdos, objects, zdo.m_uid, f)
-        : !HasLimitObjects(zdos, l, objects, zdo.m_uid, f);
+      return EwpProfiler.SearchResult(search, l == null
+        ? !HasAllObjects(zdos, objects, zdo.m_uid, f, search)
+        : !HasLimitObjects(zdos, l, objects, zdo.m_uid, f, search));
     }
     var zdoLists = GetSectorIndices(objects);
     if (l == null)
-      return !HasAllObjects(zdoLists, objects, zdo.m_uid, f);
+      return EwpProfiler.SearchResult(search, !HasAllObjects(zdoLists, objects, zdo.m_uid, f, search));
     else
-      return !HasLimitObjects(zdoLists, l, objects, zdo.m_uid, f);
+      return EwpProfiler.SearchResult(search, !HasLimitObjects(zdoLists, l, objects, zdo.m_uid, f, search));
   }
 
   public static Dictionary<int, Dictionary<string, int>> GetCounts(Object[] objects, ZDO zdo, Functions f, out Dictionary<string, int> totals)
@@ -115,6 +140,7 @@ public class ObjectsFiltering
     if (objects.Length == 0) return counts;
     foreach (var o in objects) o.Roll(f, zdo.m_position, zdo.GetRotation());
     var maxRadius = objects.Max(o => o.MaxDistance);
+    using var search = EwpProfiler.BeginSearch("GetCounts", EwpProfiler.SearchActive ? string.Join(" || ", objects.Select(o => o.ProfilerFilter)) : "", maxRadius, maxRadius > 10000);
     IEnumerable<ZDO> candidates = maxRadius > 10000
       ? ZDOMan.instance.m_objectsByID.Values
       : GetSectorIndices(objects).SelectMany(z => z);
@@ -138,19 +164,25 @@ public class ObjectsFiltering
         slot.TryGetValue(name, out var current);
         slot[name] = current + objects[index].Weight;
       }
+      if (search != null) EwpProfiler.Inspected(search, counted);
     }
+    if (search != null) search.Returned = totals.Count;
     return counts;
   }
 
-  private static bool HasAllObjects(List<List<ZDO>> zdoLists, Object[] objects, ZDOID? self, Functions f)
+  private static bool HasAllObjects(List<List<ZDO>> zdoLists, Object[] objects, ZDOID? self, Functions f, EwpProfiler.SearchContext? search)
   {
-    return objects.All(o => zdoLists.Any(zdos => zdos.Any(z => o.IsValid(z, f, self))));
+    return search == null
+      ? objects.All(o => zdoLists.Any(zdos => zdos.Any(z => o.IsValid(z, f, self))))
+      : objects.All(o => zdoLists.Any(zdos => zdos.Any(z => EwpProfiler.Inspect(search, o.IsValid(z, f, self)))));
   }
-  private static bool HasAllObjects(Dictionary<ZDOID, ZDO>.ValueCollection zdos, Object[] objects, ZDOID? self, Functions f)
+  private static bool HasAllObjects(Dictionary<ZDOID, ZDO>.ValueCollection zdos, Object[] objects, ZDOID? self, Functions f, EwpProfiler.SearchContext? search)
   {
-    return objects.All(o => zdos.Any(z => o.IsValid(z, f, self)));
+    return search == null
+      ? objects.All(o => zdos.Any(z => o.IsValid(z, f, self)))
+      : objects.All(o => zdos.Any(z => EwpProfiler.Inspect(search, o.IsValid(z, f, self))));
   }
-  private static bool HasLimitObjects(List<List<ZDO>> zdoLists, ValueRange<int> limit, Object[] objects, ZDOID? self, Functions f)
+  private static bool HasLimitObjects(List<List<ZDO>> zdoLists, ValueRange<int> limit, Object[] objects, ZDOID? self, Functions f, EwpProfiler.SearchContext? search)
   {
     var counter = 0;
     var useMax = limit.Max > 0;
@@ -159,6 +191,7 @@ public class ObjectsFiltering
       foreach (var z in list)
       {
         var valid = objects.FirstOrDefault(o => o.IsValid(z, f, self));
+        if (search != null) EwpProfiler.Inspected(search, valid != null);
         if (valid == null) continue;
         counter += valid.Weight;
         if (useMax && limit.Max < counter) return false;
@@ -168,13 +201,14 @@ public class ObjectsFiltering
     return limit.Min <= counter && counter <= limit.Max;
   }
 
-  private static bool HasLimitObjects(Dictionary<ZDOID, ZDO>.ValueCollection zdos, ValueRange<int> limit, Object[] objects, ZDOID? self, Functions f)
+  private static bool HasLimitObjects(Dictionary<ZDOID, ZDO>.ValueCollection zdos, ValueRange<int> limit, Object[] objects, ZDOID? self, Functions f, EwpProfiler.SearchContext? search)
   {
     var counter = 0;
     var useMax = limit.Max > 0;
     foreach (var z in zdos)
     {
       var valid = objects.FirstOrDefault(o => o.IsValid(z, f, self));
+      if (search != null) EwpProfiler.Inspected(search, valid != null);
       if (valid == null) continue;
       counter += valid.Weight;
       if (useMax && limit.Max < counter) return false;

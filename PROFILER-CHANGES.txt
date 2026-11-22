@@ -1,0 +1,11 @@
+Profiler-only branch: upstream/main + diagnostic instrumentation
+
+Retained: EwpProfiler; rule provenance; search counters; deferred poke/spawn trace tokens; spawn phases; startup/join/save/shutdown capture triggers; profiler build support.
+
+Phase migration: all ten former path-probe update phase measurements now use EwpProfiler tick scopes. ProfilerPhases.tsv reports calls, total inclusive wall time and maximum call time per completion second. Whole-capture aggregates remain available in ProfilerRules.tsv. No per-row probe, receipt search, path-session state or dedicated diagnostic logging lane remains. BufferedRuleLog.cs, RuleLog.cs and Settings.cs match upstream/main.
+
+Removed: PR #5 runtime implementation; teleport watches and quarantine; gameplay SessionMode/SessionFailure; export/native compatibility contracts; invasive Dvergr/Character ownership and scale policies; queued-action exception policy changes; config aliases/migration; extra terrain behavior; unrelated shared data/function changes; standalone worldsession/loadedheight APIs; deployment/FTP helpers.
+
+Upstream behavior retained: rules, chances, selection order, inventory loading, RPCs, queues, saved timer format, server-side save snapshots, config handling, YAML change detector and terrain handling.
+
+Validation of this revision: Release compilation successful; 356/356 tests passed. RuleLog_ShutdownDuringStall uses Stop(0) so the sink is released only after an already-expired shutdown budget, avoiding the race between Join(timeout) and the Stopwatch deadline. Production rule logging remains exactly upstream. In-game validation and CI not run. NU1900 prevented confirmation of package vulnerability data.

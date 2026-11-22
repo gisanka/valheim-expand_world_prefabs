@@ -11,11 +11,16 @@ public class Manager
   public static void HandleGlobal(ActionType type, string[] args, Vector3 pos, bool remove)
   {
     if (!ZNet.instance.IsServer()) return;
+    using var profiling = EwpProfiler.BeginEvent(type, args, "(global)");
     Functions f = new("", args, pos);
-    var info = InfoSelector.SelectGlobalWeighted(type, args, f, pos, remove);
-    var infos = InfoSelector.SelectGlobalSeparate(type, args, f, pos, remove);
-    if (info == null && infos == null)
-      info = InfoSelector.SelectGlobalFallback(type, args, f, pos, remove);
+    Rule? info;
+    Rule[]? infos;
+    using (EwpProfiler.Begin("select-global", EwpProfiler.Active ? type.ToString() : ""))
+    {
+      info = InfoSelector.SelectGlobalWeighted(type, args, f, pos, remove);
+      infos = InfoSelector.SelectGlobalSeparate(type, args, f, pos, remove);
+      if (info == null && infos == null) info = InfoSelector.SelectGlobalFallback(type, args, f, pos, remove);
+    }
 
     if (info != null)
       HandleGlobal(info, f, pos, remove);
@@ -25,6 +30,7 @@ public class Manager
   }
   private static void HandleGlobal(Rule info, Functions f, Vector3 pos, bool remove)
   {
+    using var profiling = EwpProfiler.BeginRule(info);
     if (info.Chance != null)
     {
       var chance = info.Chance.Get(f);
@@ -59,13 +65,18 @@ public class Manager
     // Already destroyed before.
     if (ZDOMan.instance.m_deadZDOs.ContainsKey(zdo.m_uid)) return false;
     if (!ZNet.instance.IsServer()) return false;
+    using var profiling = EwpProfiler.BeginEvent(type, args, EwpProfiler.Active ? zdo.m_prefab.ToString() : "");
     SupportAttach.SyncAttachedWorldTransform(zdo);
     var name = ZNetScene.instance.GetPrefab(zdo.m_prefab)?.name ?? "";
     ObjectFunctions f = new(name, args, zdo);
-    var info = InfoSelector.SelectWeighted(type, zdo, args, f);
-    var infos = InfoSelector.SelectSeparate(type, zdo, args, f);
-    if (info == null && infos == null)
-      info = InfoSelector.SelectFallback(type, zdo, args, f);
+    Rule? info;
+    Rule[]? infos;
+    using (EwpProfiler.Begin("select-local", EwpProfiler.Active ? type.ToString() : ""))
+    {
+      info = InfoSelector.SelectWeighted(type, zdo, args, f);
+      infos = InfoSelector.SelectSeparate(type, zdo, args, f);
+      if (info == null && infos == null) info = InfoSelector.SelectFallback(type, zdo, args, f);
+    }
     if (info == null && infos == null) return false;
 
     bool ret = false;
@@ -79,6 +90,7 @@ public class Manager
 
   private static bool Handle(Rule info, ObjectFunctions f, ZDO zdo)
   {
+    using var profiling = EwpProfiler.BeginRule(info);
     if (info.Chance != null)
     {
       var chance = info.Chance.Get(f);
@@ -139,6 +151,7 @@ public class Manager
       var hasSyncedDataChanges = false;
       if (data != null)
       {
+        using var writingProfile = EwpProfiler.Begin("data-write", info.ProfilerKey);
         ZdoEntry entry = new(zdo);
         entry.Load(data, f, zdo);
         hasSyncedDataChanges = entry.HasSyncedChanges();
@@ -227,7 +240,7 @@ public class Manager
       var connect = info.Connect?.Get(f);
       if (connect.HasValue)
         SupportAttach.Connect(entry, connect.Value);
-      var newZdo = DelayedSpawn.CreateObject(entry, false);
+      var newZdo = DelayedSpawn.CreateObject(entry, false, EwpProfiler.SpawnActive ? zdo.m_uid.ToString() : "");
       if (newZdo != null)
       {
         removeItems?.RemoveItems(f, newZdo);
@@ -323,6 +336,7 @@ public class Manager
   }
   public static void Poke(Rule info, ZDO zdo, Functions f)
   {
+    using var profiling = EwpProfiler.Begin("poke-build", info.ProfilerKey);
     var pos = zdo.m_position;
     var rot = zdo.GetRotation();
     if (info.LegacyPokes != null)
@@ -342,6 +356,7 @@ public class Manager
 
   public static void PokeGlobal(Rule info, Functions f, Vector3 pos)
   {
+    using var profiling = EwpProfiler.Begin("poke-build-global", info.ProfilerKey);
     if (info.LegacyPokes != null)
     {
       var zdos = ObjectsFiltering.GetNearby(info.PokeLimit, info.LegacyPokes, pos, Quaternion.identity, f, null, false);

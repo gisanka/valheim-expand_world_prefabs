@@ -17,6 +17,7 @@ public class Loading
 
   private static void RebuildFromCache(List<string> files, Dictionary<string, List<RuleYaml>> fileEntries)
   {
+    using var profile = EwpProfiler.Begin("yaml-rebuild", "Loading.RebuildFromCache");
     InfoManager.Clear();
     var data = files.Where(fileEntries.ContainsKey).SelectMany(f => fileEntries[f]).ToList();
     if (data.Count == 0)
@@ -26,7 +27,20 @@ public class Loading
       return;
     }
     Log.Info($"Loaded {data.Count} prefab rules.");
-    var items = data.SelectMany(FromData).ToList();
+    // Preserve provenance before runtime rule expansion (including multiple action types).
+    var items = new List<Rule>();
+    foreach (var file in files)
+    {
+      if (!fileEntries.TryGetValue(file, out var entries)) continue;
+      for (var index = 0; index < entries.Count; index++)
+      {
+        foreach (var rule in FromData(entries[index]))
+        {
+          rule.ProfilerKey = file + "#entry=" + (index + 1) + "|" + rule.Type + "|" + rule.Prefabs + "|" + string.Join(" ", rule.Args);
+          items.Add(rule);
+        }
+      }
+    }
     RuleLog.Configure(items.SelectMany(item => item.LogSources ?? []).SelectMany(source => source.Files));
     foreach (var item in items)
       InfoManager.Add(item);
