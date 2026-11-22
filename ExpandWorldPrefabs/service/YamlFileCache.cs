@@ -26,6 +26,6 @@ public sealed class YamlFileCache
       Project(prefabFiles, entries => entries));
   }
 
-  private Dictionary<string, List<T>> Project<T>(List<string> paths, Func<Yaml.MixedFileEntries, List<T>> select) =>
+  private Dictionary<string, T> Project<T>(List<string> paths, Func<Yaml.MixedFileEntries, T> select) =>
     paths.Where(files.ContainsKey).ToDictionary(path => path, path => select(files[path]), StringComparer.OrdinalIgnoreCase);
 }
