@@ -25,12 +25,15 @@ public class ProfilerPhaseTests
     Directory.CreateDirectory(directory);
     Log.Init(new ManualLogSource("ProfilerPhaseTests"));
     EwpProfiler.Initialize(new ConfigFile(Path.Combine(directory, "profiler.cfg"), false));
+    EwpProfiler.SourceCatalogRootOverride = Path.Combine(directory, "catalogs");
   }
 
   [TearDown]
   public void Cleanup()
   {
     EwpProfiler.Stop("test-cleanup");
+    EwpProfiler.SetLoadedRuleSources(Array.Empty<EwpProfiler.RuleSource>());
+    EwpProfiler.SourceCatalogRootOverride = null;
     if (Directory.Exists(directory)) Directory.Delete(directory, true);
     paths.Dispose();
   }
@@ -93,19 +96,72 @@ public class ProfilerPhaseTests
       using (EwpProfiler.Begin("rule", identity, identity)) { }
       Assert.That(EwpProfiler.Stop("test-report"), Is.True);
 
-      var sourceRows = File.ReadAllLines(Path.Combine(directory, "sources", "ProfilerRuleSources.tsv"))
+      var refs = File.ReadAllLines(Path.Combine(directory, "sources", "ProfilerSourceCatalogs.tsv"))
         .Skip(1).Select(line => line.Split('\t')).ToArray();
+      Assert.That(refs.Length, Is.EqualTo(2));
+      Assert.That(refs[0][3], Is.Not.EqualTo(refs[1][3]));
+      Assert.That(refs.Select(row => row[2]), Is.All.EqualTo("1"));
+      var sourceRows = refs.SelectMany(row =>
+      {
+        var catalog = Path.Combine(directory, "catalogs", row[3].Split('/')[1], "ProfilerRuleSources.tsv");
+        return File.ReadAllLines(catalog).Skip(1).Select(line => line.Split('\t'));
+      }).ToArray();
       Assert.That(sourceRows.Length, Is.EqualTo(2));
       Assert.That(sourceRows.Select(row => row[6]), Is.EquivalentTo(new[] { "hash-A", "hash-B" }));
       Assert.That(sourceRows.Select(row => row[3]), Is.All.EqualTo("5"));
       Assert.That(sourceRows.Select(row => row[4]), Is.EquivalentTo(new[] { "42", "45" }));
+      Assert.That(File.Exists(Path.Combine(directory, "sources", "ProfilerRuleSources.tsv")), Is.False);
       var summary = File.ReadAllText(Path.Combine(directory, "sources", "ProfilerSummary.txt"));
       Assert.That(summary, Does.Contain("Successful rule-source changes during this segment: 1"));
+      Assert.That(summary, Does.Contain("Rule source catalogs referenced: 2"));
     }
     finally
     {
       EwpProfiler.SetLoadedRuleSources(Array.Empty<EwpProfiler.RuleSource>());
     }
+  }
+
+  [Test]
+  public void UnchangedSourceCatalogIsReusedAndSurvivesSegmentPruning()
+  {
+    var source = new EwpProfiler.RuleSource("rule-A", "expand_world/a.yaml", 1, 3, 42, 44, "hash-A");
+    EwpProfiler.SetLoadedRuleSources(new[] { source });
+    Start("first-catalog");
+    Assert.That(EwpProfiler.Stop("first"), Is.True);
+    var firstRef = File.ReadAllLines(Path.Combine(directory, "first-catalog", "ProfilerSourceCatalogs.tsv"))[1].Split('\t');
+    var catalog = Path.Combine(directory, "catalogs", firstRef[3].Split('/')[1], "ProfilerRuleSources.tsv");
+    Assert.That(File.Exists(catalog), Is.True);
+    Assert.That(Path.GetFileName(Path.GetDirectoryName(catalog)!), Does.Match(
+      @"^\d{8}_\d{6}_\d{3}_sources_\d{6}(?:_\d{2})?$"));
+
+    // Deliberately delete the old performance segment but keep its catalog.
+    Directory.Delete(Path.Combine(directory, "first-catalog"), true);
+    EwpProfiler.SetLoadedRuleSources(new[] { new EwpProfiler.RuleSource(
+      "rule-A", "expand_world/a.yaml", 1, 3, 42, 44, "hash-A") });
+    Start("second-catalog");
+    Assert.That(EwpProfiler.Stop("second"), Is.True);
+    var secondRef = File.ReadAllLines(Path.Combine(directory, "second-catalog", "ProfilerSourceCatalogs.tsv"))[1].Split('\t');
+    Assert.That(secondRef[3], Is.EqualTo(firstRef[3]));
+    Assert.That(Directory.GetDirectories(Path.Combine(directory, "catalogs")), Has.Length.EqualTo(1));
+    Assert.That(File.Exists(catalog), Is.True);
+  }
+
+  [Test]
+  public void ChangedSourceAfterRotationCreatesNewTimestampedCatalog()
+  {
+    EwpProfiler.SetLoadedRuleSources(new[] {
+      new EwpProfiler.RuleSource("rule-A", "expand_world/a.yaml", 1, 1, 1, 3, "hash-A") });
+    Start("before-change");
+    Assert.That(EwpProfiler.Stop("first"), Is.True);
+    var a = File.ReadAllLines(Path.Combine(directory, "before-change", "ProfilerSourceCatalogs.tsv"))[1].Split('\t')[3];
+
+    EwpProfiler.SetLoadedRuleSources(new[] {
+      new EwpProfiler.RuleSource("rule-A", "expand_world/a.yaml", 1, 1, 1, 4, "hash-B") });
+    Start("after-change");
+    Assert.That(EwpProfiler.Stop("second"), Is.True);
+    var b = File.ReadAllLines(Path.Combine(directory, "after-change", "ProfilerSourceCatalogs.tsv"))[1].Split('\t')[3];
+    Assert.That(b, Is.Not.EqualTo(a));
+    Assert.That(Directory.GetDirectories(Path.Combine(directory, "catalogs")), Has.Length.EqualTo(2));
   }
 
   [Test]

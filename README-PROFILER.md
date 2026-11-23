@@ -79,7 +79,7 @@ Files are created as one timestamped run directory:
 9. `ProfilerPlayerEvents.tsv` — all actual player joins and disconnects occurring during this segment: join ordinal (server-session connection number), Player-ZDO identity, elapsed time in milliseconds and seconds, UTC and Europe/Berlin clock time. No player names or addresses are stored. A long scope is counted at its **completion** second (not apportioned among seconds).
 10. `ProfilerPhases.tsv` — complete EWP update phase durations, grouped by completion second: `SecondSinceStart`, `Phase`, `Calls`, `TotalWallMs`, `MaxCallMs`. Phases are `created`, `changed`, `spawn`, `remove`, `pokes`, `exec`, `rpc`, `terrain`, `owner` and `saved-data`. They wrap HandleCreated, HandleChanged, the respective delayed queues, and DataStorage.SaveSavedData. All executed calls, including empty queue checks, are counted while the profiler is active. Whole-capture phase aggregates also appear in `ProfilerRules.tsv` under `Kind=tick`. These inclusive durations contain nested rule/search work and must not be added to those costs; they measure processing, not configured delays or queue waiting. Phase values include all scripts, not just Enigma paths. `TerrainSnapshot.Execute` remains outside these ten phase scopes.
 
-**YAML source lookup (Profiler 1.12):** `ProfilerRuleSources.tsv` maps the
+**YAML source lookup (Profiler 1.14):** `ProfilerRuleSources.tsv` maps the
 unchanged `RuleIdentity` to `SourceFile` (relative to BepInEx/config),
 1-based `RuleEntry` (script-only), 1-based `YamlItem` (full mixed YAML list),
 and the original `StartLine`/`EndLine` before shorthand normalization.
@@ -89,10 +89,25 @@ successfully parsed text snapshot, encoded in Base64. One YAML item expanded
 by `types` yields multiple rows with the same physical source location.
 No YAML source information is looked up during rule execution.
 
-If a successfully loaded prefab YAML changes while a segment is active,
-`ProfilerSummary.txt` reports the number of rule-source changes.
-`ProfilerRuleSources.tsv` then retains both observed mappings when their
-versions differ. Existing metric columns and identities are unchanged:
+The full `ProfilerRuleSources.tsv` is stored **outside prunable segment directories**:
+
+`<expand_world base directory>/logs/EwpProfilerSources/YYYYMMDD_HHMMSS_fff_sources_<revision>/ProfilerRuleSources.tsv`
+
+The directory uses the Europe/Berlin timestamp, as do regular profiler segments.
+Every segment writes only a small `ProfilerSourceCatalogs.tsv` with
+`FirstObservedSeconds`, `SourceRevision`, `RuleCount` and `CatalogPath`.
+`CatalogPath` is relative to `<expand_world base directory>/logs/`.
+An unchanged loaded source revision references exactly the same directory on
+every subsequent segment; deleting old `EwpProfiler` segment directories
+does not delete the sibling `EwpProfilerSources` directory.
+If a catalog is removed while the server is running, the next relevant
+segment regenerates it in a fresh time-stamped directory.
+
+If successfully loaded prefab YAML changes, a new versioned source
+catalog is created at the next report write. A segment that spans a
+successful reload references both source versions, with their first
+observed offsets. `ProfilerSummary.txt` reports the number of
+rule-source changes. Existing metric columns and identities are unchanged:
 measurements sharing a `RuleIdentity` may include work from both versions,
 and must not be interpreted as version-separated.
 

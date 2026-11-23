@@ -56,9 +56,15 @@ internal static class EwpProfiler
   private static readonly List<PlayerMarker> PlayerMarkers = new();
   // Updated only when EWP successfully rebuilds YAML rules, never on the rule hot path.
   private static readonly Dictionary<string, RuleSource> LoadedRuleSources = new(StringComparer.Ordinal);
-  // Preserve source versions observed within this report segment.
-  private static readonly Dictionary<string, RuleSource> SegmentRuleSources = new(StringComparer.Ordinal);
+  // Each successfully loaded source snapshot is assigned a process-local revision.
+  // Reports reference immutable, separately stored catalogs instead of duplicating
+  // tens of thousands of rule-to-YAML mappings at every report rotation.
+  private static long SourceRevision;
+  private static readonly List<RuleSourceSnapshot> SegmentSourceSnapshots = new();
+  private static readonly Dictionary<string, string> SourceCatalogFiles = new(StringComparer.Ordinal);
   private static int RuleSourceReloads;
+  // Test fixture isolation. Production catalogs live beside EwpProfiler segments.
+  internal static string? SourceCatalogRootOverride;
   private static readonly Dictionary<string, SpawnTotals> SpawnStats = new(StringComparer.Ordinal);
   private static readonly List<SpawnEvent> SpawnEvents = new();
   private const int MaxSpawnEvents = 6000;
@@ -138,6 +144,13 @@ internal static class EwpProfiler
       YamlItem + "\u001f" + StartLine + "\u001f" + EndLine + "\u001f" + SourceFile;
   }
 
+  private sealed class RuleSourceSnapshot(long revision, double firstObservedSeconds, RuleSource[] sources)
+  {
+    internal long Revision { get; } = revision;
+    internal double FirstObservedSeconds { get; } = firstObservedSeconds;
+    internal RuleSource[] Sources { get; } = sources;
+  }
+
   internal static void SetLoadedRuleSources(IEnumerable<RuleSource> sources)
   {
     var next = new Dictionary<string, RuleSource>(StringComparer.Ordinal);
@@ -147,11 +160,18 @@ internal static class EwpProfiler
       bool changed = LoadedRuleSources.Count != next.Count ||
         LoadedRuleSources.Any(pair => !next.TryGetValue(pair.Key, out var value) ||
           pair.Value.VersionKey != value.VersionKey);
-      if (Running && LoadedRuleSources.Count > 0 && changed) RuleSourceReloads++;
+      if (!changed) return;
+      if (Running && LoadedRuleSources.Count > 0) RuleSourceReloads++;
+      SourceRevision++;
       LoadedRuleSources.Clear();
       foreach (var pair in next) LoadedRuleSources.Add(pair.Key, pair.Value);
-      if (Running)
-        foreach (var source in next.Values) SegmentRuleSources[source.VersionKey] = source;
+      // A source change is captured once, not on every rule execution.
+      // A segment crossing a reload can therefore reference both versions.
+      if (Running && next.Count > 0)
+      {
+        var elapsed = Math.Max(0, (Stopwatch.GetTimestamp() - CaptureStart) / (double)Stopwatch.Frequency);
+        SegmentSourceSnapshots.Add(new RuleSourceSnapshot(SourceRevision, elapsed, next.Values.ToArray()));
+      }
     }
   }
 
@@ -261,8 +281,9 @@ internal static class EwpProfiler
       LastUpdateStart = 0; LastGcSecond = -1;
       PreviousGc0 = GC.CollectionCount(0); PreviousGc1 = GC.CollectionCount(1); PreviousGc2 = GC.CollectionCount(2);
       SpawnStats.Clear(); SpawnEvents.Clear(); DroppedSpawnEvents = 0; SpawnProfilerErrors = 0;
-      SegmentRuleSources.Clear();
-      foreach (var source in LoadedRuleSources.Values) SegmentRuleSources[source.VersionKey] = source;
+      SegmentSourceSnapshots.Clear();
+      if (LoadedRuleSources.Count > 0)
+        SegmentSourceSnapshots.Add(new RuleSourceSnapshot(SourceRevision, 0, LoadedRuleSources.Values.ToArray()));
       RuleSourceReloads = 0;
       DroppedChains = 0; DroppedSlow = 0; ScopeOrderErrors = 0;
       SavedDataIdleChecks = SavedDataCooldownChecks = SavedDataAttempts = SavedDataSuccesses = 0;
@@ -913,9 +934,70 @@ internal static class EwpProfiler
     { At = at; Kind = kind; Name = name; Rule = rule; Trace = trace; Span = span; Parent = parent; Total = total; Exclusive = exclusive; }
   }
 
+  private static List<string> WriteSourceCatalogReferences()
+  {
+    const string catalogFile = "ProfilerRuleSources.tsv";
+    var references = new List<string> {
+      "FirstObservedSeconds\tSourceRevision\tRuleCount\tCatalogPath"
+    };
+    var root = SourceCatalogRootOverride ??
+      Path.Combine(FileLoading.BaseDirectory, "logs", "EwpProfilerSources");
+    foreach (var snapshot in SegmentSourceSnapshots)
+    {
+      // The path is unique to this server process and successfully loaded rule
+      // revision. An unchanged revision reuses its catalog for every rotation.
+      var cacheKey = root + "\u001f" + snapshot.Revision.ToString(Invariant);
+      if (!SourceCatalogFiles.TryGetValue(cacheKey, out var fullFile) || !File.Exists(fullFile))
+      {
+        Directory.CreateDirectory(root);
+        var stamp = GermanTime(DateTime.UtcNow).ToString("yyyyMMdd_HHmmss_fff", Invariant);
+        var suffix = 0;
+        string folder;
+        do
+        {
+          folder = stamp + "_sources_" + snapshot.Revision.ToString("D6", Invariant) +
+            (suffix == 0 ? "" : "_" + suffix.ToString("D2", Invariant));
+          suffix++;
+        } while (Directory.Exists(Path.Combine(root, folder)));
+        var catalogDirectory = Path.Combine(root, folder);
+        Directory.CreateDirectory(catalogDirectory);
+        var rows = new List<string>(snapshot.Sources.Length + 1) {
+          "RuleIdentity\tSourceFile\tRuleEntry\tYamlItem\tStartLine\tEndLine\tContentHash"
+        };
+        foreach (var source in snapshot.Sources.OrderBy(s => s.RuleIdentity, StringComparer.Ordinal)
+          .ThenBy(s => s.ContentHash, StringComparer.Ordinal).ThenBy(s => s.StartLine))
+          rows.Add(Clean(source.RuleIdentity) + "\t" + Clean(source.SourceFile) + "\t" +
+            source.RuleEntry + "\t" + source.YamlItem + "\t" + source.StartLine + "\t" +
+            source.EndLine + "\t" + Clean(source.ContentHash));
+        // Only a complete file can ever be referenced. A failed write leaves
+        // the temporary file unreferenced and Stop() reports the failure.
+        var temporary = Path.Combine(catalogDirectory, catalogFile + ".tmp");
+        fullFile = Path.Combine(catalogDirectory, catalogFile);
+        try
+        {
+          File.WriteAllLines(temporary, rows, new UTF8Encoding(false));
+          File.Move(temporary, fullFile);
+        }
+        finally
+        {
+          if (File.Exists(temporary)) File.Delete(temporary);
+        }
+        SourceCatalogFiles[cacheKey] = fullFile;
+      }
+      var directoryName = Path.GetFileName(Path.GetDirectoryName(fullFile)!);
+      // Relative to expand_world/logs, not to the prunable segment directory.
+      var relative = "EwpProfilerSources/" + directoryName + "/" + catalogFile;
+      references.Add(Num(snapshot.FirstObservedSeconds) + "\t" +
+        snapshot.Revision + "\t" + snapshot.Sources.Length + "\t" + relative);
+    }
+    Write("ProfilerSourceCatalogs.tsv", references);
+    return references;
+  }
+
   private static void WriteReports(string path)
   {
     Directory.CreateDirectory(path);
+    var catalogReferences = WriteSourceCatalogReferences();
     var stopUtc = DateTime.UtcNow;
     var top = Math.Max(1, TopN.Value);
     var stats = Stats.ToArray();
@@ -923,7 +1005,7 @@ internal static class EwpProfiler
     var searches = SearchStats.ToArray();
     var chains = ChainStats.Values.ToArray();
     var lines = new List<string> {
-      "EWP internal profiler 1.13 — instrumented wall-clock, NOT actual thread CPU time",
+      "EWP internal profiler 1.14 — instrumented wall-clock, NOT actual thread CPU time",
       "EWP source version: " + EWP.VERSION,
       "DevAssistant export interface: contract=1, capabilities=1, thread-safe session epoch (role compatibility protocol 176 not asserted)",
       "UTC start: " + StartUtc.ToString("O", Invariant),
@@ -956,6 +1038,8 @@ internal static class EwpProfiler
       "Player marker numbers are server-session connection ordinals, not persistent character IDs; ZDO identities allow matching join/leave within the same session.",
       "Successful rule-source changes during this segment: " + RuleSourceReloads +
         (RuleSourceReloads > 0 ? "; repeated RuleIdentity values may combine measurements from different loaded YAML versions." : ""),
+      "Rule source catalogs referenced: " + (catalogReferences.Count - 1) +
+        "; paths in ProfilerSourceCatalogs.tsv are relative to expand_world/logs/EwpProfilerSources parent.",
       "Slow-event threshold ms: " + Num(Detailed.Value ? SlowMs.Value / 4d : SlowMs.Value) + (Detailed.Value ? " (detailed mode)" : " (baseline mode)"),
       "Out-of-order profiler scope disposals: " + ScopeOrderErrors,
       "Timing: inclusive/exclusive are for *instrumented* nested scopes; exclusive includes uninstrumented children and is NOT CPU time.",
@@ -1012,12 +1096,6 @@ internal static class EwpProfiler
     else
       lines.Add("GC boundary samples: disabled");
     Write("ProfilerSummary.txt", lines);
-    var sourceRows = new List<string> { "RuleIdentity\tSourceFile\tRuleEntry\tYamlItem\tStartLine\tEndLine\tContentHash" };
-    foreach (var source in SegmentRuleSources.Values.OrderBy(s => s.RuleIdentity, StringComparer.Ordinal)
-      .ThenBy(s => s.ContentHash, StringComparer.Ordinal).ThenBy(s => s.StartLine))
-      sourceRows.Add(Clean(source.RuleIdentity) + "\t" + Clean(source.SourceFile) + "\t" +
-        source.RuleEntry + "\t" + source.YamlItem + "\t" + source.StartLine + "\t" + source.EndLine + "\t" + Clean(source.ContentHash));
-    Write("ProfilerRuleSources.tsv", sourceRows);
 
     var general = new List<string> { "Kind\tIdentity\tCalls\tInclusiveMs\tExclusiveMs\tAverageMs\tMaxMs\tP50BucketLowerMs\tP95BucketLowerMs\tP99BucketLowerMs" };
     foreach (var kv in stats.OrderByDescending(x => x.Value.Inclusive))
