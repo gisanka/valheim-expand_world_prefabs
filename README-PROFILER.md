@@ -181,7 +181,13 @@ The `ZNet.SaveWorld` postfix runs after the synchronous save initiation, not nec
 
 A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Console output is intentionally short: a continuous rotation emits **one**
 line, e.g. `Profiler: new continuous-gameplay segment #20261123_163000_466 (interval)`
-or `Profiler: new continuous-gameplay segment #20261123_163000_466 (world-save)`.
+or `Profiler: new continuous-gameplay segment #20261123_163000_466 (world-save) - 1 clients`.
+The optional `N clients` suffix is the server's current
+`ZNet.GetPeers().Count` (the same remote-peer count as
+`ProfilerRuntime.tsv` / `ConnectedPeers`); it excludes the server
+itself, but is a network-peer count, not a guarantee that each client
+has finished loading a player. When server state is unavailable, the
+suffix is omitted instead of inventing a zero.
 The displayed timestamp belongs to the **new** batch and the parenthesized
 reason belongs to the **completed** previous batch. Initial standalone
 starts and final stops remain separately logged; report write failures

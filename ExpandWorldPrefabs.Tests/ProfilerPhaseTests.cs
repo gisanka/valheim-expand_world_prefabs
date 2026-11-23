@@ -69,6 +69,14 @@ public class ProfilerPhaseTests
       Is.EqualTo("Profiler: new continuous-gameplay segment #20261123_163000_466 (world-save)"));
     Assert.That(EwpProfiler.FormatRotationLog("continuous-server-idle", batch, "manual-snapshot"),
       Does.Not.Contain("C:"));
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-gameplay", batch, "interval", 1),
+      Is.EqualTo("Profiler: new continuous-gameplay segment #20261123_163000_466 (interval) - 1 clients"));
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-gameplay", batch, "world-save", 2),
+      Is.EqualTo("Profiler: new continuous-gameplay segment #20261123_163000_466 (world-save) - 2 clients"));
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-server-idle", batch, "interval", 0),
+      Is.EqualTo("Profiler: new continuous-server-idle segment #20261123_163000_466 (interval) - 0 clients"));
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-gameplay", batch, "interval", -1),
+      Is.EqualTo("Profiler: new continuous-gameplay segment #20261123_163000_466 (interval)"));
   }
 
   [Test]

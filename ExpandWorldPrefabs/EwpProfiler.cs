@@ -293,8 +293,22 @@ internal static class EwpProfiler
 
   // Report the NEW batch and why its predecessor ended, not two adjacent
   // messages for old-report completion and new-capture start.
-  internal static string FormatRotationLog(string captureType, string batchId, string previousEndReason) =>
-    "Profiler: new " + captureType + " segment #" + batchId + " (" + previousEndReason + ")";
+  internal static string FormatRotationLog(string captureType, string batchId, string previousEndReason,
+    int connectedClients = -1) =>
+    "Profiler: new " + captureType + " segment #" + batchId + " (" + previousEndReason + ")" +
+    (connectedClients >= 0 ? " - " + connectedClients.ToString(Invariant) + " clients" : "");
+
+  // Matches ProfilerRuntime.tsv ConnectedPeers: live remote ZNet peers on
+  // the server (not the host itself). If no server is ready, omit the count.
+  private static int GetConnectedClients()
+  {
+    try
+    {
+      var net = ZNet.instance;
+      return net != null && net.IsServer() ? net.GetPeers().Count : -1;
+    }
+    catch { return -1; }
+  }
 
   internal static bool Start(string reason, string? previousEndReason = null)
   {
@@ -339,7 +353,7 @@ internal static class EwpProfiler
     }
     Log.Info(previousEndReason == null
       ? FormatBatchLog("started", reason, batch)
-      : FormatRotationLog(reason, batch, previousEndReason));
+      : FormatRotationLog(reason, batch, previousEndReason, GetConnectedClients()));
     return true;
   }
 
@@ -1185,8 +1199,7 @@ internal static class EwpProfiler
         row.Gc2 += Math.Max(0, c - PreviousGc2);
         PreviousGc0 = a; PreviousGc1 = b; PreviousGc2 = c;
         LastGcSecond = second;
-        try { row.Peers = ZNet.instance != null && ZNet.instance.IsServer() ? ZNet.instance.GetPeers().Count : -1; }
-        catch { row.Peers = -1; }
+        row.Peers = GetConnectedClients();
         row.QueueDepth = PokeTimers.PendingCount;
       }
     }
