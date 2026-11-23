@@ -342,6 +342,91 @@ public class ProfilerPhaseTests
   }
 
   [Test]
+  public void SlowRootWorkAccountsForChildrenOmittedByTheTreeLimit()
+  {
+    var threshold = (ConfigEntry<float>)typeof(EwpProfiler)
+      .GetField("SlowRootThreshold", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    threshold.Value = 0f;
+    Start("slow-root-work");
+    using (EwpProfiler.Begin("tick", "heavy"))
+    {
+      for (var i = 0; i < 200; i++)
+        using (EwpProfiler.Begin("search", "query-" + i, "rule-A")) { }
+    }
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+
+    var rootRows = File.ReadAllLines(Path.Combine(directory, "slow-root-work", "ProfilerSlowRoots.tsv"))
+      .Skip(1).Select(r => r.Split('\t')).ToArray();
+    Assert.That(rootRows.Count(r => r[4] == "search"), Is.LessThanOrEqualTo(128));
+    var root = rootRows.Single(r => r[4] == "tick" && r[5] == "heavy");
+    Assert.That(root[11], Is.EqualTo("200"));
+    Assert.That(int.Parse(root[12], CultureInfo.InvariantCulture), Is.GreaterThanOrEqualTo(72));
+
+    var rows = File.ReadAllLines(Path.Combine(directory, "slow-root-work", "ProfilerSlowRootWork.tsv"))
+      .Skip(1).Select(r => r.Split('\t')).Where(r => r[0] == root[0]).ToArray();
+    var category = rows.Single(r => r[1] == "kind-total" && r[2] == "search");
+    Assert.That(category[5], Is.EqualTo("200"),
+      "All instrumented child calls count even when only 128 fit in the tree.");
+    var detailCount = rows.Where(r => r[1] == "detail" || r[1] == "detail-overflow")
+      .Sum(r => long.Parse(r[5], CultureInfo.InvariantCulture));
+    Assert.That(detailCount, Is.EqualTo(200));
+    var self = rows.Single(r => r[1] == "root-self");
+    var categoryMs = double.Parse(category[6], CultureInfo.InvariantCulture);
+    var selfMs = double.Parse(self[6], CultureInfo.InvariantCulture);
+    var rootMs = double.Parse(root[7], CultureInfo.InvariantCulture);
+    Assert.That(categoryMs + selfMs, Is.EqualTo(rootMs).Within(0.02));
+  }
+
+  [Test]
+  public void SlowRootDetailLimitStillKeepsExactKindAndOverflowTotals()
+  {
+    var root = new EwpProfiler.Frame { Span = 1, Root = true };
+    var buffer = new EwpProfiler.RootTraceBuffer();
+    for (var i = 0; i < 300; i++)
+    {
+      var child = new EwpProfiler.Frame { Span = i + 2, Parent = root,
+        CallParentSpan = 1, ParentSpan = 1, Started = 0,
+        Kind = "search", Name = "dynamic-query-" + i, Rule = "rule-X" };
+      buffer.Complete(child, 30, 12, 0);
+    }
+    var rows = buffer.WorkSnapshot();
+    Assert.That(rows.Single(r => r.Level == "kind-total" && r.Kind == "search").Totals.Calls,
+      Is.EqualTo(300));
+    Assert.That(rows.Single(r => r.Level == "kind-total").Totals.Exclusive, Is.EqualTo(3600));
+    Assert.That(rows.Where(r => r.Level == "detail" || r.Level == "detail-overflow")
+      .Sum(r => r.Totals.Calls), Is.EqualTo(300));
+    Assert.That(buffer.DetailOverflowCalls, Is.EqualTo(44));
+    Assert.That(buffer.Omitted, Is.EqualTo(172));
+  }
+
+  [Test]
+  public void SlowEventsKeepSlowestEntriesAndSummarizeAllThresholdHits()
+  {
+    var threshold = (ConfigEntry<float>)typeof(EwpProfiler)
+      .GetField("SlowMs", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    threshold.Value = 0f;
+    Start("slow-event-top");
+    for (var i = 0; i < 3000; i++)
+      using (EwpProfiler.Begin("event", "fast-" + i)) { }
+    using (EwpProfiler.Begin("event", "slow-after-limit"))
+      System.Threading.Thread.Sleep(20);
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+
+    var events = File.ReadAllLines(Path.Combine(directory, "slow-event-top", "ProfilerSlowEvents.tsv"));
+    Assert.That(events, Has.Length.EqualTo(3001));
+    Assert.That(events.Any(row => row.Contains("slow-after-limit")), Is.True,
+      "Late slow events must displace fast early events.");
+    var summary = File.ReadAllLines(Path.Combine(directory, "slow-event-top", "ProfilerSlowEventSummary.tsv"))
+      .Skip(1).Select(row => row.Split('\t')).ToArray();
+    var kind = summary.Single(row => row[0] == "kind-total" && row[1] == "event");
+    Assert.That(kind[4], Is.EqualTo("3001"));
+    Assert.That(summary.Where(row => row[0] == "detail" || row[0] == "detail-overflow")
+      .Sum(row => long.Parse(row[4], CultureInfo.InvariantCulture)), Is.EqualTo(3001));
+    var text = File.ReadAllText(Path.Combine(directory, "slow-event-top", "ProfilerSummary.txt"));
+    Assert.That(text, Does.Contain("Slow events retained (slowest): 3000; not retained: 1; qualifying: 3001"));
+  }
+
+  [Test]
   public void TargetedRuleScopes_AreAttributedWithoutTouchingUnselectedRules()
   {
     Start("target-rule");

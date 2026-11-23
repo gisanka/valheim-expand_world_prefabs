@@ -46,13 +46,21 @@ internal static class EwpProfiler
   private static int DroppedMarkers;
   private const int MaxSlowRoots = 120;
   private const int MaxRootSpans = 128;
+  private const int MaxRootWorkDetails = 256;
+  private const int MaxSlowEventDetails = 1024;
   private static int DroppedSlowRoots;
   private static long SlowRootCandidates;
   private static long LastUpdateStart;
   private static long LastGcSecond;
   private static int PreviousGc0, PreviousGc1, PreviousGc2;
   [ThreadStatic] private static RootTraceBuffer? RootScratch;
+  // Slow holds a min-heap of the slowest completed events, independent of
+  // unbounded event count. All threshold-qualified events enter the aggregates.
   private static readonly List<SlowEvent> Slow = new();
+  private static long SlowQualified;
+  private static readonly Dictionary<string, ScopeCostTotals> SlowKinds = new(StringComparer.Ordinal);
+  private static readonly Dictionary<(string Kind, string Name, string Rule), ScopeCostTotals> SlowDetails = new();
+  private static readonly Dictionary<string, ScopeCostTotals> SlowDetailOverflow = new(StringComparer.Ordinal);
   // Connection lifecycle markers are kept only for the current capture segment.
   private static readonly List<PlayerMarker> PlayerMarkers = new();
   // Updated only when EWP successfully rebuilds YAML rules, never on the rule hot path.
@@ -295,6 +303,7 @@ internal static class EwpProfiler
     {
       if (Running) return false;
       Stats.Clear(); DirectStats.Clear(); SearchStats.Clear(); ChainStats.Clear(); Seconds.Clear(); Slow.Clear(); PlayerMarkers.Clear();
+      SlowQualified = 0; SlowKinds.Clear(); SlowDetails.Clear(); SlowDetailOverflow.Clear();
       RuntimeSeconds.Clear(); SlowRoots.Clear(); DroppedSlowRoots = 0; SlowRootCandidates = 0;
       Markers.Clear(); DroppedMarkers = 0;
       LastUpdateStart = 0; LastGcSecond = -1;
@@ -440,6 +449,32 @@ internal static class EwpProfiler
     internal RootTraceBuffer? RootSpans;
   }
 
+  // Reusable counters. Inclusive totals describe nested calls and must not be
+  // added together; EXCLUSIVE totals are the additive cost accounting.
+  internal sealed class ScopeCostTotals
+  {
+    internal long Calls, Exclusive, Inclusive, MaxInclusive, MaxSpan;
+    internal void Add(long span, long inclusive, long exclusive)
+    {
+      Calls++; Inclusive += inclusive; Exclusive += exclusive;
+      if (inclusive > MaxInclusive) { MaxInclusive = inclusive; MaxSpan = span; }
+    }
+    internal ScopeCostTotals Copy() => new() {
+      Calls = Calls, Inclusive = Inclusive, Exclusive = Exclusive,
+      MaxInclusive = MaxInclusive, MaxSpan = MaxSpan
+    };
+  }
+
+  internal sealed class ScopeCostRow(string level, string kind, string name,
+    string rule, ScopeCostTotals totals)
+  {
+    internal string Level { get; } = level;
+    internal string Kind { get; } = kind;
+    internal string Name { get; } = name;
+    internal string Rule { get; } = rule;
+    internal ScopeCostTotals Totals { get; } = totals;
+  }
+
   // A bounded, ancestry-preserving buffer: once full, newly completed costly
   // scopes can replace cheaper LEAVES, never an ancestor of a retained scope.
   // Provisional ancestors are filled in when their own scope completes.
@@ -453,13 +488,55 @@ internal static class EwpProfiler
     private readonly List<RootSpan> Candidates = new(MaxRootSpans + 8);
     private readonly HashSet<long> Required = new();
     private readonly HashSet<long> ParentIds = new();
+    // Exact categories count every child, including ones omitted from Children.
+    // Detailed identities are bounded; excess events are counted in explicit
+    // per-kind overflow groups, never silently discarded from the cost total.
+    private readonly Dictionary<string, ScopeCostTotals> KindWork = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string Kind, string Name, string Rule), ScopeCostTotals> DetailWork = new();
+    private readonly Dictionary<string, ScopeCostTotals> DetailOverflow = new(StringComparer.Ordinal);
+    internal long DetailOverflowCalls { get; private set; }
     internal long Observed { get; private set; }
     internal int Omitted => (int)Math.Max(0, Observed - Children.Count);
     internal RootSpan[] Snapshot() => Children.ToArray();
+    internal ScopeCostRow[] WorkSnapshot()
+    {
+      var rows = new List<ScopeCostRow>(KindWork.Count + DetailWork.Count + DetailOverflow.Count);
+      foreach (var kv in KindWork)
+        rows.Add(new ScopeCostRow("kind-total", kv.Key, "", "", kv.Value.Copy()));
+      foreach (var kv in DetailWork)
+        rows.Add(new ScopeCostRow("detail", kv.Key.Kind, kv.Key.Name, kv.Key.Rule, kv.Value.Copy()));
+      foreach (var kv in DetailOverflow)
+        rows.Add(new ScopeCostRow("detail-overflow", kv.Key, "(other operations/rules)", "", kv.Value.Copy()));
+      return rows.ToArray();
+    }
     internal void Clear()
     {
       Children.Clear(); Additions.Clear(); Candidates.Clear();
       Required.Clear(); ParentIds.Clear(); Observed = 0;
+      KindWork.Clear(); DetailWork.Clear(); DetailOverflow.Clear(); DetailOverflowCalls = 0;
+    }
+
+    private void RecordWork(Frame frame, long elapsed, long exclusive)
+    {
+      if (!KindWork.TryGetValue(frame.Kind, out var kind))
+        KindWork[frame.Kind] = kind = new ScopeCostTotals();
+      kind.Add(frame.Span, elapsed, exclusive);
+      var key = (frame.Kind, frame.Name, frame.Rule);
+      if (DetailWork.TryGetValue(key, out var detail))
+        detail.Add(frame.Span, elapsed, exclusive);
+      else if (DetailWork.Count < MaxRootWorkDetails)
+      {
+        detail = new ScopeCostTotals();
+        detail.Add(frame.Span, elapsed, exclusive);
+        DetailWork.Add(key, detail);
+      }
+      else
+      {
+        DetailOverflowCalls++;
+        if (!DetailOverflow.TryGetValue(frame.Kind, out var overflow))
+          DetailOverflow[frame.Kind] = overflow = new ScopeCostTotals();
+        overflow.Add(frame.Span, elapsed, exclusive);
+      }
     }
 
     private static bool Contains(List<RootSpan> list, long id)
@@ -472,6 +549,7 @@ internal static class EwpProfiler
     internal void Complete(Frame frame, long elapsed, long exclusive, long captureStart)
     {
       Observed++;
+      RecordWork(frame, elapsed, exclusive);
       var completed = new RootSpan(frame.Span, frame.CallParentSpan, frame.ParentSpan,
         frame.Started - captureStart, frame.Kind, frame.Name, frame.Rule, elapsed, exclusive);
       var known = -1;
@@ -852,17 +930,71 @@ internal static class EwpProfiler
           {
             var recorded = new SlowRootTrace(f.Span, f.ParentSpan, f.Started - CaptureStart,
               f.Kind, f.Name, f.Rule, elapsed, exclusive, f.RootSpans.Observed,
-              f.RootSpans.Omitted, f.RootSpans.Snapshot());
+              f.RootSpans.Omitted, f.RootSpans.DetailOverflowCalls,
+              f.RootSpans.Snapshot(), f.RootSpans.WorkSnapshot());
             if (replaceAt == SlowRoots.Count) SlowRoots.Add(recorded);
             else SlowRoots[replaceAt] = recorded;
           }
         }
       }
       if (elapsed >= MsToTicks(Detailed.Value ? SlowMs.Value / 4d : SlowMs.Value))
+        RecordSlowEvent(f, end, elapsed, exclusive);
+    }
+  }
+
+  private static void RecordSlowEvent(Frame f, long end, long elapsed, long exclusive)
+  {
+    SlowQualified++;
+    if (!SlowKinds.TryGetValue(f.Kind, out var kind))
+      SlowKinds[f.Kind] = kind = new ScopeCostTotals();
+    kind.Add(f.Span, elapsed, exclusive);
+
+    var key = (f.Kind, f.Name, f.Rule);
+    if (SlowDetails.TryGetValue(key, out var detail))
+      detail.Add(f.Span, elapsed, exclusive);
+    else if (SlowDetails.Count < MaxSlowEventDetails)
+    {
+      detail = new ScopeCostTotals();
+      detail.Add(f.Span, elapsed, exclusive);
+      SlowDetails.Add(key, detail);
+    }
+    else
+    {
+      if (!SlowDetailOverflow.TryGetValue(f.Kind, out var overflow))
+        SlowDetailOverflow[f.Kind] = overflow = new ScopeCostTotals();
+      overflow.Add(f.Span, elapsed, exclusive);
+    }
+
+    if (Slow.Count < MaxSlow)
+    {
+      Slow.Add(new SlowEvent(end - CaptureStart, f.Kind, f.Name, f.Rule,
+        f.Trace, f.Span, f.ParentSpan, elapsed, exclusive));
+      // Keep the smallest currently retained duration at index zero.
+      var i = Slow.Count - 1;
+      while (i > 0)
       {
-        if (Slow.Count < MaxSlow)
-          Slow.Add(new SlowEvent(end - CaptureStart, f.Kind, f.Name, f.Rule, f.Trace, f.Span, f.ParentSpan, elapsed, exclusive));
-        else DroppedSlow++;
+        var parent = (i - 1) / 2;
+        if (Slow[parent].Total <= Slow[i].Total) break;
+        (Slow[parent], Slow[i]) = (Slow[i], Slow[parent]);
+        i = parent;
+      }
+    }
+    else
+    {
+      DroppedSlow++; // Threshold-qualified but not present in final top-3000.
+      if (elapsed <= Slow[0].Total) return;
+      Slow[0] = new SlowEvent(end - CaptureStart, f.Kind, f.Name, f.Rule,
+        f.Trace, f.Span, f.ParentSpan, elapsed, exclusive);
+      var i = 0;
+      while (true)
+      {
+        var left = i * 2 + 1;
+        if (left >= Slow.Count) break;
+        var right = left + 1;
+        var smallest = right < Slow.Count && Slow[right].Total < Slow[left].Total ? right : left;
+        if (Slow[i].Total <= Slow[smallest].Total) break;
+        (Slow[i], Slow[smallest]) = (Slow[smallest], Slow[i]);
+        i = smallest;
       }
     }
   }
@@ -873,6 +1005,9 @@ internal static class EwpProfiler
   private static long MsToTicks(double milliseconds) => (long)(Math.Max(0, milliseconds) * Stopwatch.Frequency / 1000d);
   private static double Ms(long ticks) => ticks * (1000d / Stopwatch.Frequency);
   private static string Num(double value) => value.ToString("0.###", Invariant);
+  private static string CostColumns(ScopeCostTotals totals) =>
+    totals.Calls + "\t" + Num(Ms(totals.Exclusive)) + "\t" +
+    Num(Ms(totals.Inclusive)) + "\t" + Num(Ms(totals.MaxInclusive)) + "\t" + totals.MaxSpan;
   private static string Clean(string? value) => (value ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
   private static void Write(string path, IEnumerable<string> lines) => File.WriteAllLines(Path.Combine(OutputDirectory, path), lines, new UTF8Encoding(false));
 
@@ -961,7 +1096,7 @@ internal static class EwpProfiler
   }
   private sealed class SlowRootTrace(long id, long causalParent, long started, string kind,
     string name, string rule, long inclusive, long exclusive, long observed,
-    int omitted, RootSpan[] children)
+    int omitted, long overflowCalls, RootSpan[] children, ScopeCostRow[] work)
   {
     internal long Id { get; } = id;
     internal long CausalParent { get; } = causalParent;
@@ -973,8 +1108,10 @@ internal static class EwpProfiler
     internal long Exclusive { get; } = exclusive;
     internal long Observed { get; } = observed;
     internal int Omitted { get; } = omitted;
+    internal long DetailOverflowCalls { get; } = overflowCalls;
     internal bool Truncated => Omitted > 0;
     internal RootSpan[] Children { get; } = children;
+    internal ScopeCostRow[] Work { get; } = work;
   }
   private readonly struct ProfilerMarker(DateTime utc, long elapsedTicks, string label)
   {
@@ -1147,7 +1284,7 @@ internal static class EwpProfiler
     var searches = SearchStats.ToArray();
     var chains = ChainStats.Values.ToArray();
     var lines = new List<string> {
-      "EWP internal profiler 1.15 — instrumented wall-clock, NOT actual thread CPU time",
+      "EWP internal profiler 1.16 — instrumented wall-clock, NOT actual thread CPU time",
       "EWP source version: " + EWP.VERSION,
       "DevAssistant export interface: contract=1, capabilities=1, thread-safe session epoch (role compatibility protocol 176 not asserted)",
       "UTC start: " + StartUtc.ToString("O", Invariant),
@@ -1170,13 +1307,16 @@ internal static class EwpProfiler
         "; last database entries=" + SavedDataLastEntries + "; last UTF-8 bytes=" + SavedDataLastBytes +
         "; total written UTF-8 bytes=" + SavedDataTotalBytes,
       "Trace chains: " + chains.Length + "; dropped chain-record attempts: " + DroppedChains,
-      "Slow events retained: " + Slow.Count + "; dropped: " + DroppedSlow,
+      "Slow events retained (slowest): " + Slow.Count + "; not retained: " + DroppedSlow +
+        "; qualifying: " + SlowQualified + "; detail groups: " + SlowDetails.Count +
+        "; overflow detail calls: " + SlowDetailOverflow.Values.Sum(x => x.Calls),
       "Slow-root recording enabled: " + (CaptureSlowRootTrees?.Value ?? false) +
         "; threshold ms: " + Num(SlowRootThreshold?.Value ?? 100f),
       "Slow roots qualifying: " + SlowRootCandidates + "; retained slowest: " + SlowRoots.Count +
         "; not retained by top-" + MaxSlowRoots + " limit: " + DroppedSlowRoots +
         "; truncated retained roots: " + SlowRoots.Count(r => r.Truncated) +
         "; omitted child spans in retained roots: " + SlowRoots.Sum(r => (long)r.Omitted) +
+        "; root-work detail overflow calls: " + SlowRoots.Sum(r => r.DetailOverflowCalls) +
         "; max child spans per root: " + MaxRootSpans,
       "Manual marks retained: " + Markers.Count + "; dropped: " + DroppedMarkers,
       "Spawn groups: " + SpawnStats.Count + "; retained individual events: " + SpawnEvents.Count + "; dropped: " + DroppedSpawnEvents + "; profiler errors: " + SpawnProfilerErrors,
@@ -1278,6 +1418,20 @@ internal static class EwpProfiler
     foreach (var e in Slow.OrderByDescending(x => x.Total))
       slowRows.Add(Num(e.At / (double)Stopwatch.Frequency) + "\t" + Clean(e.Kind) + "\t" + Clean(e.Name) + "\t" + Clean(e.Rule) + "\t" + e.Trace + "\t" + e.Span + "\t" + e.Parent + "\t" + Num(Ms(e.Total)) + "\t" + Num(Ms(e.Exclusive)));
     Write("ProfilerSlowEvents.tsv", slowRows);
+    var slowSummary = new List<string> {
+      "GroupLevel\tKind\tIdentity\tRuleContext\tCalls\tTotalExclusiveMs\tTotalInclusiveMs_NonAdditive\tMaxInclusiveMs\tMaxSpanID"
+    };
+    foreach (var kv in SlowKinds.OrderByDescending(x => x.Value.Exclusive))
+      slowSummary.Add("kind-total\t" + Clean(kv.Key) + "\t\t\t" +
+        CostColumns(kv.Value));
+    foreach (var kv in SlowDetails.OrderByDescending(x => x.Value.Exclusive))
+      slowSummary.Add("detail\t" + Clean(kv.Key.Kind) + "\t" + Clean(kv.Key.Name) +
+        "\t" + Clean(kv.Key.Rule) + "\t" + CostColumns(kv.Value));
+    foreach (var kv in SlowDetailOverflow.OrderByDescending(x => x.Value.Exclusive))
+      slowSummary.Add("detail-overflow\t" + Clean(kv.Key) +
+        "\t(other operations/rules)\t\t" + CostColumns(kv.Value));
+    Write("ProfilerSlowEventSummary.tsv", slowSummary);
+
     var roots = new List<string> { "RootSpanID\tSpanID\tParentSpanID\tStartSeconds\tKind\tIdentity\tRuleContext\tInclusiveMs\tExclusiveMs\tTruncated\tCausalParentSpanID\tObservedChildSpans\tOmittedChildSpans" };
     foreach (var root in SlowRoots.OrderByDescending(x => x.Inclusive))
     {
@@ -1294,6 +1448,20 @@ internal static class EwpProfiler
           "\t0\t" + child.CausalParent + "\t\t");
     }
     Write("ProfilerSlowRoots.tsv", roots);
+    var rootWork = new List<string> {
+      "RootSpanID\tGroupLevel\tKind\tIdentity\tRuleContext\tCalls\tTotalExclusiveMs\tTotalInclusiveMs_NonAdditive\tMaxInclusiveMs\tMaxSpanID"
+    };
+    foreach (var root in SlowRoots.OrderByDescending(x => x.Inclusive))
+    {
+      var own = new ScopeCostTotals();
+      own.Add(root.Id, root.Inclusive, root.Exclusive);
+      rootWork.Add(root.Id + "\troot-self\t" + Clean(root.Kind) + "\t" +
+        Clean(root.Name) + "\t" + Clean(root.Rule) + "\t" + CostColumns(own));
+      foreach (var row in root.Work.OrderByDescending(x => x.Totals.Exclusive))
+        rootWork.Add(root.Id + "\t" + row.Level + "\t" + Clean(row.Kind) +
+          "\t" + Clean(row.Name) + "\t" + Clean(row.Rule) + "\t" + CostColumns(row.Totals));
+    }
+    Write("ProfilerSlowRootWork.tsv", rootWork);
     var runtimeRows = new List<string> { "SecondSinceStart\tUpdates\tEwpLateUpdateTotalMs\tEwpLateUpdateAverageMs\tEwpLateUpdateMaxMs\tEwpLateUpdateP95BucketLowerMs\tEwpLateUpdateP99BucketLowerMs\tMaxUpdateStartIntervalMs\tGC0Delta\tGC1Delta\tGC2Delta\tConnectedPeers\tPokeQueueDepth\tPokeDispatches\tRestoredPokeDispatches\tPokeLatenessMaxMs\tPokeLatenessP95BucketLowerMs" };
     foreach (var pair in RuntimeSeconds)
     {

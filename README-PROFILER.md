@@ -249,6 +249,31 @@ not a truncation. The TSV now separates the actual synchronous
 unchanged.
 
 A segment keeps the **120 slowest roots**, not the first 120.
+`ProfilerSlowRootWork.tsv` accompanies the bounded tree with an exact
+per-root account of **all instrumented child spans**, including children not
+retained in the 128-span tree. Rows marked `root-self` show exclusive work
+not spent in instrumented children; `kind-total` rows group every child
+by scope kind (an exact non-overlapping cost partition). Their
+`TotalExclusiveMs` values plus the `root-self` row account for the
+root's inclusive time within measurement precision. `detail` rows provide
+the kind, operation identity, rule context, count, total exclusive time,
+maximum individual inclusive time and its `MaxSpanID`. Detail keys are
+bounded to 256 identities per live root; further identities contribute
+to labeled `detail-overflow` rows grouped by kind. Kind totals remain
+exact. Detail rows and kind totals are **alternative breakdowns**, not
+values to sum together. Inclusive totals are nonadditive because child
+scopes can be nested. Dynamic identity grouping may have more overhead
+than the fixed tree alone.
+
+`ProfilerSlowEvents.tsv` now keeps the **3,000 slowest qualifying events**
+per segment rather than the first 3,000. A bounded min-heap avoids an
+unbounded event list. The new `ProfilerSlowEventSummary.tsv` counts
+**all threshold-qualified slow events**, whether or not their individual
+rows survived retention. It has exact `kind-total` rows and up to 1,024
+`detail` keys, then exact per-kind `detail-overflow` counts and costs.
+The existing `ProfilerRules.tsv` continues to aggregate *all* profiled
+scopes, including those faster than the slow-event threshold.
+The original `ProfilerSlowEvents.tsv` columns are unchanged.
 `ProfilerSummary.txt` reports recording enabled/disabled, threshold,
 qualified roots, retained roots, excluded roots, retained truncated roots,
 and omitted child spans in retained roots. The root rows add
