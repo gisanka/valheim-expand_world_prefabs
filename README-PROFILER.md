@@ -172,7 +172,7 @@ Reports are **rotating segments**, not a cumulative lifetime log: each segment b
 
 The `ZNet.SaveWorld` postfix runs after the synchronous save initiation, not necessarily after Valheim's asynchronous writer completes. It only sets an atomic flag. EWP checks it at the start of a subsequent `LateUpdate` and writes the nine report files there. This separates profiling I/O from Valheim's save code, but writing multiple MB of TSV files can still briefly occupy the Unity main thread; run on a test server and monitor spikes. The 180-second rotation ensures progress reports even if the save hook is absent or no world save happens.
 
-A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Console output is intentionally short, e.g. `Profiler started: continuous-gameplay #20261123_044100_484` and `Profiler saved: continuous-gameplay #20261123_044100_484 (interval)`. The batch identifier is the Europe/Berlin timestamp prefix of the full report directory, which remains in `ProfilerSummary.txt`. Write failures use the same batch identifier and include the exception type and message without repeating the absolute output directory. BepInEx displays `Loading [Expand World Prefabs 1.67 - Profiler 1.16]` on this private branch; because BepInEx appends the registered plugin version, that metadata version is `1.16`, while the `EWP.VERSION` source constant remains `1.67`. Other mods specifying a minimum BepInEx dependency version for this plugin may be affected. If the server uses UTC (as in DatHost), the summaries show server-local UTC and an explicit German local time field.
+A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Console output is intentionally short, e.g. `Profiler started: continuous-gameplay #20261123_044100_484` and `Profiler saved: continuous-gameplay #20261123_044100_484 (interval)`. The batch identifier is the Europe/Berlin timestamp prefix of the full report directory, which remains in `ProfilerSummary.txt`. Write failures use the same batch identifier and include the exception type and message without repeating the absolute output directory. BepInEx retains its upstream metadata (`Loading [Expand World Prefabs 1.67]`), preserving dependency-version compatibility. `EwpProfiler.Initialize()` writes `Profiler 1.16 initialized` once during plugin startup instead. If the server uses UTC (as in DatHost), the summaries show server-local UTC and an explicit German local time field.
 
 `ewp_profiler_snapshot` is available to force a report without stopping continuous measurement. `ewp_profiler_stop` ends the current segment; when `CaptureOnPlayerJoin=true`, any later real join may start a new segment if none is running. This does not change active continuous segments.
 
@@ -289,10 +289,12 @@ remains a distinct root.
 
 The private branch also defaults to `EnableProfiler = true`,
 `EnableDetailedEvents = true`, `EnableAllocationDiagnostics = true`,
-and `RecordAllSpawnEvents = true`. A **one-time config migration**
-updates old persisted values on first use of 1.15, so existing
-`CaptureSlowRootTrees = false` configurations are also activated.
-After this first migration, explicit user changes are respected.
+and `RecordAllSpawnEvents = true` for **new configurations**.
+There is no configuration migration or automatic override: an existing
+`CaptureSlowRootTrees = false` or any other explicitly saved setting
+remains in effect. The obsolete `InternalDiagnosticDefaultsV115`
+entry, if present in older config files, is no longer read or written
+by the profiler.
 Slow-event and spawn-event outputs remain capped; their drop counts
 may rise in long or busy segments.
 These defaults can increase CPU cost, allocation pressure and log size;

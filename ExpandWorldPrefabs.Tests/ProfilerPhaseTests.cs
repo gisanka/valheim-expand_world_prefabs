@@ -60,14 +60,14 @@ public class ProfilerPhaseTests
   }
 
   [Test]
-  public void PluginMetadataShowsUpstreamAndProfilerVersionsInLoader()
+  public void PluginMetadataKeepsUpstreamVersionAndProfilerHasIndependentVersion()
   {
     var metadata = typeof(EWP).GetCustomAttribute<BepInEx.BepInPlugin>();
     Assert.That(metadata, Is.Not.Null);
     Assert.That(metadata!.Name + " " + metadata.Version,
-      Is.EqualTo("Expand World Prefabs 1.67 - Profiler 1.16"));
+      Is.EqualTo("Expand World Prefabs 1.67"));
     Assert.That(EWP.VERSION, Is.EqualTo("1.67"));
-    Assert.That(EWP.PROFILER_VERSION, Is.EqualTo("1.16"));
+    Assert.That(EwpProfiler.ProfilerVersion, Is.EqualTo("1.16"));
   }
 
   [Test]
@@ -264,22 +264,25 @@ public class ProfilerPhaseTests
   }
 
   [Test]
-  public void ExistingProfilerConfigIsMigratedOnceWithoutOverwritingLaterEdits()
+  public void ExistingProfilerConfigIsPreservedWithoutMigration()
   {
     var cfg = new ConfigFile(Path.Combine(directory, "legacy-profiler.cfg"), false);
     cfg.Bind("EWP Profiler", "EnableProfiler", false).Value = false;
-    cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", false).Value = false;
-    cfg.Bind("EWP Profiler", "RuleDetailFilter", "").Value = "";
-    EwpProfiler.Initialize(cfg);
-    Assert.That(cfg.Bind("EWP Profiler", "EnableProfiler", false).Value, Is.True);
-    Assert.That(cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", false).Value, Is.True);
-    Assert.That(cfg.Bind("EWP Profiler", "RuleDetailFilter", "").Value, Is.EqualTo("*"));
-    Assert.That(cfg.Bind("EWP Profiler", "InternalDiagnosticDefaultsV115", false).Value, Is.True);
-
+    cfg.Bind("EWP Profiler", "EnableDetailedEvents", true).Value = false;
+    cfg.Bind("EWP Profiler", "EnableAllocationDiagnostics", true).Value = false;
+    cfg.Bind("EWP Profiler", "RecordAllSpawnEvents", true).Value = false;
     cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", true).Value = false;
+    cfg.Bind("EWP Profiler", "SlowRootThresholdMs", 100f).Value = 250f;
     cfg.Bind("EWP Profiler", "RuleDetailFilter", "*").Value = "source#entry=42";
+
     EwpProfiler.Initialize(cfg);
+
+    Assert.That(cfg.Bind("EWP Profiler", "EnableProfiler", true).Value, Is.False);
+    Assert.That(cfg.Bind("EWP Profiler", "EnableDetailedEvents", true).Value, Is.False);
+    Assert.That(cfg.Bind("EWP Profiler", "EnableAllocationDiagnostics", true).Value, Is.False);
+    Assert.That(cfg.Bind("EWP Profiler", "RecordAllSpawnEvents", true).Value, Is.False);
     Assert.That(cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", true).Value, Is.False);
+    Assert.That(cfg.Bind("EWP Profiler", "SlowRootThresholdMs", 100f).Value, Is.EqualTo(250f));
     Assert.That(cfg.Bind("EWP Profiler", "RuleDetailFilter", "*").Value, Is.EqualTo("source#entry=42"));
   }
 

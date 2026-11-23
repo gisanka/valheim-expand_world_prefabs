@@ -15,6 +15,7 @@ namespace ExpandWorld.Prefab;
 // All game state is read-only. Aggregate locks also cover calls from other threads.
 internal static class EwpProfiler
 {
+  internal const string ProfilerVersion = "1.16";
   private static ConfigEntry<bool> Enable = null!;
   private static ConfigEntry<bool> OnJoin = null!;
   private static ConfigEntry<bool> OnStartup = null!;
@@ -207,23 +208,9 @@ internal static class EwpProfiler
     RuleDetailFilter = config.Bind(section, "RuleDetailFilter", "*", "Use * for every rule (internal diagnostic default), a case-insensitive RuleIdentity substring for selected rules, or empty to disable detail scopes. Applies on YAML rebuild.");
     CaptureSlowRootTrees = config.Bind(section, "CaptureSlowRootTrees", true, "Temporarily buffer up to 128 child spans per root and retain up to 120 roots exceeding SlowRootThresholdMs per segment. Diagnostic mode only.");
     SlowRootThreshold = config.Bind(section, "SlowRootThresholdMs", 100f, "Minimum inclusive root milliseconds for a bounded synchronous span tree.");
-    // Existing BepInEx config files retain OLD values even when the Bind
-    // defaults above change. Upgrade once on this internal diagnostic branch
-    // so an installation with 1.13/1.14 settings runs fully instrumented
-    // without any manual config edits. Subsequent user edits are respected.
-    var migrated = config.Bind(section, "InternalDiagnosticDefaultsV115", false,
-      "One-time migration of profiler defaults for the private runtime-analysis branch.");
-    if (!migrated.Value)
-    {
-      Enable.Value = true;
-      Detailed.Value = true;
-      Allocations.Value = true;
-      AllSpawnEvents.Value = true;
-      RuleDetailFilter.Value = "*";
-      CaptureSlowRootTrees.Value = true;
-      SlowRootThreshold.Value = 100f;
-      migrated.Value = true;
-    }
+    // Defaults apply to new configurations only. Existing settings, including
+    // explicit opt-outs, are never overridden or migrated.
+    Log.Info("Profiler " + ProfilerVersion + " initialized");
   }
 
   private static int InitialGc0, InitialGc1, InitialGc2;
@@ -1302,7 +1289,7 @@ internal static class EwpProfiler
     var searches = SearchStats.ToArray();
     var chains = ChainStats.Values.ToArray();
     var lines = new List<string> {
-      "EWP internal profiler 1.16 — instrumented wall-clock, NOT actual thread CPU time",
+      "EWP internal profiler " + ProfilerVersion + " — instrumented wall-clock, NOT actual thread CPU time",
       "EWP source version: " + EWP.VERSION,
       "DevAssistant export interface: contract=1, capabilities=1, thread-safe session epoch (role compatibility protocol 176 not asserted)",
       "UTC start: " + StartUtc.ToString("O", Invariant),

@@ -8,14 +8,12 @@ using Service;
 using UnityEngine;
 namespace ExpandWorld.Prefab;
 
-[BepInPlugin(GUID, NAME, PROFILER_VERSION)]
+[BepInPlugin(GUID, NAME, VERSION)]
 public class EWP : BaseUnityPlugin
 {
   public const string GUID = "expand_world_prefabs";
-  public const string VERSION = "1.67"; // Upstream source version.
-  public const string PROFILER_VERSION = "1.16"; // Internal diagnostic branch.
-  // BepInEx appends its metadata version to the displayed plugin name.
-  public const string NAME = "Expand World Prefabs " + VERSION + " - Profiler";
+  public const string NAME = "Expand World Prefabs";
+  public const string VERSION = "1.67";
 #nullable disable
   public static Harmony Harmony;
 #nullable enable
