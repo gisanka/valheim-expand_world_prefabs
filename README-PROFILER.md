@@ -102,10 +102,17 @@ Every segment writes only a small `ProfilerSourceCatalogs.tsv` with
 `FirstObservedSeconds`, `SourceRevision`, `RuleCount` and `CatalogPath`.
 `CatalogPath` is relative to `<expand_world base directory>/logs/`.
 An unchanged loaded source revision references exactly the same directory on
-every subsequent segment; deleting old `EwpProfiler` segment directories
-does not delete the sibling `EwpProfilerSources` directory.
-If a catalog is removed while the server is running, the next relevant
-segment regenerates it in a fresh time-stamped directory.
+every subsequent segment. On the first new revision (including after a server
+restart), the profiler compares its complete canonical TSV rows with **only
+the most recent** timestamped source catalog directory. If identical, it
+reuses that existing file across runs, without creating a duplicate.
+Otherwise it creates a new timestamped catalog. It deliberately does not
+search older catalogs: an A → B → A sequence creates three directories.
+If the newest catalog file is missing or unreadable, a new catalog is
+created instead of referencing an older one. Comparison occurs only when
+the in-memory revision cache misses at report write, never on the rule
+hot path. Deleting old `EwpProfiler` segment directories does not delete
+the sibling `EwpProfilerSources` directory.
 
 If successfully loaded prefab YAML changes, a new versioned source
 catalog is created at the next report write. A segment that spans a
@@ -172,7 +179,14 @@ Reports are **rotating segments**, not a cumulative lifetime log: each segment b
 
 The `ZNet.SaveWorld` postfix runs after the synchronous save initiation, not necessarily after Valheim's asynchronous writer completes. It only sets an atomic flag. EWP checks it at the start of a subsequent `LateUpdate` and writes the nine report files there. This separates profiling I/O from Valheim's save code, but writing multiple MB of TSV files can still briefly occupy the Unity main thread; run on a test server and monitor spikes. The 180-second rotation ensures progress reports even if the save hook is absent or no world save happens.
 
-A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Console output is intentionally short, e.g. `Profiler started: continuous-gameplay #20261123_044100_484` and `Profiler saved: continuous-gameplay #20261123_044100_484 (interval)`. The batch identifier is the Europe/Berlin timestamp prefix of the full report directory, which remains in `ProfilerSummary.txt`. Write failures use the same batch identifier and include the exception type and message without repeating the absolute output directory. BepInEx retains its upstream metadata (`Loading [Expand World Prefabs 1.67]`), preserving dependency-version compatibility. `EwpProfiler.Initialize()` writes `Profiler 1.16 initialized` once during plugin startup instead. If the server uses UTC (as in DatHost), the summaries show server-local UTC and an explicit German local time field.
+A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Console output is intentionally short: a continuous rotation emits **one**
+line, e.g. `Profiler: new continuous-gameplay segment #20261123_163000_466 (interval)`
+or `Profiler: new continuous-gameplay segment #20261123_163000_466 (world-save)`.
+The displayed timestamp belongs to the **new** batch and the parenthesized
+reason belongs to the **completed** previous batch. Initial standalone
+starts and final stops remain separately logged; report write failures
+still produce a warning. Manual snapshots and first-player transitions
+also use a single new-segment message. The batch identifier is the Europe/Berlin timestamp prefix of the full report directory, which remains in `ProfilerSummary.txt`. Write failures use the same batch identifier and include the exception type and message without repeating the absolute output directory. BepInEx retains its upstream metadata (`Loading [Expand World Prefabs 1.67]`), preserving dependency-version compatibility. `EwpProfiler.Initialize()` writes `Profiler 1.16 initialized` once during plugin startup instead. If the server uses UTC (as in DatHost), the summaries show server-local UTC and an explicit German local time field.
 
 `ewp_profiler_snapshot` is available to force a report without stopping continuous measurement. `ewp_profiler_stop` ends the current segment; when `CaptureOnPlayerJoin=true`, any later real join may start a new segment if none is running. This does not change active continuous segments.
 

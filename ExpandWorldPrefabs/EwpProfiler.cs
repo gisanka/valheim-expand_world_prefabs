@@ -243,8 +243,8 @@ internal static class EwpProfiler
     {
       if (Running && IsStartupCapture)
       {
-        Stop("player-join-transition");
-        Start("first-player-join");
+        Stop("player-join-transition", suppressSuccessLog: true);
+        Start("first-player-join", previousEndReason: "player-join-transition");
       }
       else if (!Running)
       {
@@ -291,7 +291,12 @@ internal static class EwpProfiler
     "Profiler " + action + ": " + captureType + " #" + batchId +
     (endReason == null ? "" : " (" + endReason + ")");
 
-  internal static bool Start(string reason)
+  // Report the NEW batch and why its predecessor ended, not two adjacent
+  // messages for old-report completion and new-capture start.
+  internal static string FormatRotationLog(string captureType, string batchId, string previousEndReason) =>
+    "Profiler: new " + captureType + " segment #" + batchId + " (" + previousEndReason + ")";
+
+  internal static bool Start(string reason, string? previousEndReason = null)
   {
     string batch;
     lock (Sync)
@@ -332,7 +337,9 @@ internal static class EwpProfiler
       }
       Running = true;
     }
-    Log.Info(FormatBatchLog("started", reason, batch));
+    Log.Info(previousEndReason == null
+      ? FormatBatchLog("started", reason, batch)
+      : FormatRotationLog(reason, batch, previousEndReason));
     return true;
   }
 
@@ -364,22 +371,23 @@ internal static class EwpProfiler
     // intentionally become unattributed in the new generation.
     var nextReason = AnyPlayerJoined ? "continuous-gameplay" : "continuous-server-idle";
     // Even a failed report must not silently disable continuous profiling.
-    Stop(reason);
-    if (ShouldContinuous) Start(nextReason);
+    var resume = ShouldContinuous;
+    Stop(reason, suppressSuccessLog: resume);
+    if (resume) Start(nextReason, previousEndReason: reason);
   }
 
   internal static bool Snapshot()
   {
     if (!Running) return false;
     var nextReason = AnyPlayerJoined ? "continuous-gameplay" : "continuous-server-idle";
-    var written = Stop("manual-snapshot");
-    Start(nextReason);
+    var written = Stop("manual-snapshot", suppressSuccessLog: true);
+    Start(nextReason, previousEndReason: "manual-snapshot");
     return written;
   }
 
   internal static bool Stop() => Stop("manual-or-shutdown");
 
-  internal static bool Stop(string reason)
+  internal static bool Stop(string reason, bool suppressSuccessLog = false)
   {
     string path, batch, captureType;
     bool written = false;
@@ -407,7 +415,8 @@ internal static class EwpProfiler
           ": " + e.GetType().Name + ": " + message);
       }
     }
-    if (written) Log.Info(FormatBatchLog("saved", captureType, batch, reason));
+    if (written && !suppressSuccessLog)
+      Log.Info(FormatBatchLog("saved", captureType, batch, reason));
     return written;
   }
 
@@ -1218,6 +1227,30 @@ internal static class EwpProfiler
     { At = at; Kind = kind; Name = name; Rule = rule; Trace = trace; Span = span; Parent = parent; Total = total; Exclusive = exclusive; }
   }
 
+  // Compare ONLY the newest timestamped catalog. Older historical catalogs
+  // are intentionally not searched if the newest differs or is unreadable.
+  // This runs on report write, never in the rule evaluation hot path.
+  internal static string? FindLatestMatchingSourceCatalog(string root, IReadOnlyList<string> rows)
+  {
+    if (!Directory.Exists(root)) return null;
+    var latest = Directory.EnumerateDirectories(root, "*_sources_*", SearchOption.TopDirectoryOnly)
+      .OrderByDescending(path => Path.GetFileName(path), StringComparer.Ordinal)
+      .FirstOrDefault();
+    if (latest == null) return null;
+    var catalog = Path.Combine(latest, "ProfilerRuleSources.tsv");
+    if (!File.Exists(catalog)) return null;
+    try
+    {
+      using var lines = File.ReadLines(catalog, Encoding.UTF8).GetEnumerator();
+      foreach (var row in rows)
+        if (!lines.MoveNext() || !string.Equals(lines.Current, row, StringComparison.Ordinal))
+          return null;
+      return lines.MoveNext() ? null : catalog;
+    }
+    catch (IOException) { return null; }
+    catch (UnauthorizedAccessException) { return null; }
+  }
+
   private static List<string> WriteSourceCatalogReferences()
   {
     const string catalogFile = "ProfilerRuleSources.tsv";
@@ -1233,18 +1266,6 @@ internal static class EwpProfiler
       var cacheKey = root + "\u001f" + snapshot.Revision.ToString(Invariant);
       if (!SourceCatalogFiles.TryGetValue(cacheKey, out var fullFile) || !File.Exists(fullFile))
       {
-        Directory.CreateDirectory(root);
-        var stamp = GermanTime(DateTime.UtcNow).ToString("yyyyMMdd_HHmmss_fff", Invariant);
-        var suffix = 0;
-        string folder;
-        do
-        {
-          folder = stamp + "_sources_" + snapshot.Revision.ToString("D6", Invariant) +
-            (suffix == 0 ? "" : "_" + suffix.ToString("D2", Invariant));
-          suffix++;
-        } while (Directory.Exists(Path.Combine(root, folder)));
-        var catalogDirectory = Path.Combine(root, folder);
-        Directory.CreateDirectory(catalogDirectory);
         var rows = new List<string>(snapshot.Sources.Length + 1) {
           "RuleIdentity\tSourceFile\tRuleEntry\tYamlItem\tStartLine\tEndLine\tContentHash"
         };
@@ -1253,18 +1274,39 @@ internal static class EwpProfiler
           rows.Add(Clean(source.RuleIdentity) + "\t" + Clean(source.SourceFile) + "\t" +
             source.RuleEntry + "\t" + source.YamlItem + "\t" + source.StartLine + "\t" +
             source.EndLine + "\t" + Clean(source.ContentHash));
-        // Only a complete file can ever be referenced. A failed write leaves
-        // the temporary file unreferenced and Stop() reports the failure.
-        var temporary = Path.Combine(catalogDirectory, catalogFile + ".tmp");
-        fullFile = Path.Combine(catalogDirectory, catalogFile);
-        try
+        // Reuse the most recent matching catalog even across server restarts.
+        // The timestamped directory survives; the in-memory revision cache
+        // does not. Compare complete canonical TSV rows, not just YAML hashes.
+        var matchingCatalog = FindLatestMatchingSourceCatalog(root, rows);
+        if (matchingCatalog != null)
+          fullFile = matchingCatalog;
+        else
         {
-          File.WriteAllLines(temporary, rows, new UTF8Encoding(false));
-          File.Move(temporary, fullFile);
-        }
-        finally
-        {
-          if (File.Exists(temporary)) File.Delete(temporary);
+          Directory.CreateDirectory(root);
+          var stamp = GermanTime(DateTime.UtcNow).ToString("yyyyMMdd_HHmmss_fff", Invariant);
+          var suffix = 0;
+          string folder;
+          do
+          {
+            folder = stamp + "_sources_" + snapshot.Revision.ToString("D6", Invariant) +
+              (suffix == 0 ? "" : "_" + suffix.ToString("D2", Invariant));
+            suffix++;
+          } while (Directory.Exists(Path.Combine(root, folder)));
+          var catalogDirectory = Path.Combine(root, folder);
+          Directory.CreateDirectory(catalogDirectory);
+          // Only a complete file can ever be referenced. A failed write
+          // leaves the temporary file unreferenced for retry on next capture.
+          var temporary = Path.Combine(catalogDirectory, catalogFile + ".tmp");
+          fullFile = Path.Combine(catalogDirectory, catalogFile);
+          try
+          {
+            File.WriteAllLines(temporary, rows, new UTF8Encoding(false));
+            File.Move(temporary, fullFile);
+          }
+          finally
+          {
+            if (File.Exists(temporary)) File.Delete(temporary);
+          }
         }
         SourceCatalogFiles[cacheKey] = fullFile;
       }

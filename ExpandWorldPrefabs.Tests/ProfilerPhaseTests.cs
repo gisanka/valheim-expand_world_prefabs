@@ -60,6 +60,18 @@ public class ProfilerPhaseTests
   }
 
   [Test]
+  public void RotationLogNamesOnlyNewBatchAndPreviousEndReason()
+  {
+    const string batch = "20261123_163000_466";
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-gameplay", batch, "interval"),
+      Is.EqualTo("Profiler: new continuous-gameplay segment #20261123_163000_466 (interval)"));
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-gameplay", batch, "world-save"),
+      Is.EqualTo("Profiler: new continuous-gameplay segment #20261123_163000_466 (world-save)"));
+    Assert.That(EwpProfiler.FormatRotationLog("continuous-server-idle", batch, "manual-snapshot"),
+      Does.Not.Contain("C:"));
+  }
+
+  [Test]
   public void PluginMetadataKeepsUpstreamVersionAndProfilerHasIndependentVersion()
   {
     var metadata = typeof(EWP).GetCustomAttribute<BepInEx.BepInPlugin>(inherit: false);
@@ -169,6 +181,75 @@ public class ProfilerPhaseTests
     Assert.That(secondRef[3], Is.EqualTo(firstRef[3]));
     Assert.That(Directory.GetDirectories(Path.Combine(directory, "catalogs")), Has.Length.EqualTo(1));
     Assert.That(File.Exists(catalog), Is.True);
+  }
+
+  [Test]
+  public void IdenticalCatalogIsReusedEvenAfterLoadedRevisionChanges()
+  {
+    var source = new EwpProfiler.RuleSource("rule-A", "expand_world/a.yaml", 1, 3, 42, 44, "hash-A");
+    EwpProfiler.SetLoadedRuleSources(new[] { source });
+    Start("initial-revision");
+    Assert.That(EwpProfiler.Stop("first"), Is.True);
+    var first = File.ReadAllLines(Path.Combine(directory, "initial-revision", "ProfilerSourceCatalogs.tsv"))[1]
+      .Split('\t')[3];
+
+    // Simulate another server lifecycle: an in-memory source revision alone
+    // must not force an identical full on-disk catalog to be written again.
+    EwpProfiler.SetLoadedRuleSources(Array.Empty<EwpProfiler.RuleSource>());
+    EwpProfiler.SetLoadedRuleSources(new[] { source });
+    Start("new-revision");
+    Assert.That(EwpProfiler.Stop("second"), Is.True);
+    var second = File.ReadAllLines(Path.Combine(directory, "new-revision", "ProfilerSourceCatalogs.tsv"))[1]
+      .Split('\t')[3];
+    Assert.That(second, Is.EqualTo(first));
+    Assert.That(Directory.GetDirectories(Path.Combine(directory, "catalogs")), Has.Length.EqualTo(1));
+  }
+
+  [Test]
+  public void OnlyNewestCatalogIsCheckedEvenWhenAnOlderCatalogMatches()
+  {
+    var a = new EwpProfiler.RuleSource("rule-A", "expand_world/a.yaml", 1, 3, 42, 44, "hash-A");
+    var b = new EwpProfiler.RuleSource("rule-A", "expand_world/a.yaml", 1, 3, 42, 44, "hash-B");
+    EwpProfiler.SetLoadedRuleSources(new[] { a });
+    Start("catalog-a");
+    Assert.That(EwpProfiler.Stop("first"), Is.True);
+    var first = File.ReadAllLines(Path.Combine(directory, "catalog-a", "ProfilerSourceCatalogs.tsv"))[1]
+      .Split('\t')[3];
+
+    EwpProfiler.SetLoadedRuleSources(new[] { b });
+    Start("catalog-b");
+    Assert.That(EwpProfiler.Stop("second"), Is.True);
+    var middle = File.ReadAllLines(Path.Combine(directory, "catalog-b", "ProfilerSourceCatalogs.tsv"))[1]
+      .Split('\t')[3];
+    Assert.That(middle, Is.Not.EqualTo(first));
+
+    EwpProfiler.SetLoadedRuleSources(new[] { a });
+    Start("catalog-a-returned");
+    Assert.That(EwpProfiler.Stop("third"), Is.True);
+    var last = File.ReadAllLines(Path.Combine(directory, "catalog-a-returned", "ProfilerSourceCatalogs.tsv"))[1]
+      .Split('\t')[3];
+    Assert.That(last, Is.Not.EqualTo(first),
+      "Only the latest catalog B may be compared, even if older A matches.");
+    Assert.That(last, Is.Not.EqualTo(middle));
+    Assert.That(Directory.GetDirectories(Path.Combine(directory, "catalogs")), Has.Length.EqualTo(3));
+  }
+
+  [Test]
+  public void MissingLatestCatalogFileCreatesFreshCatalogInsteadOfReusingOlder()
+  {
+    var root = Path.Combine(directory, "catalogs");
+    Directory.CreateDirectory(root);
+    var earlier = Path.Combine(root, "20260101_000000_000_sources_000001");
+    var latest = Path.Combine(root, "20260102_000000_000_sources_000001");
+    Directory.CreateDirectory(earlier);
+    Directory.CreateDirectory(latest);
+    var lines = new[] { "RuleIdentity\tSourceFile", "rule-A\texpand_world/a.yaml" };
+    File.WriteAllLines(Path.Combine(earlier, "ProfilerRuleSources.tsv"), lines);
+    Assert.That(EwpProfiler.FindLatestMatchingSourceCatalog(root, lines), Is.Null);
+    File.WriteAllLines(Path.Combine(latest, "ProfilerRuleSources.tsv"), lines);
+    Assert.That(EwpProfiler.FindLatestMatchingSourceCatalog(root, lines),
+      Is.EqualTo(Path.Combine(latest, "ProfilerRuleSources.tsv")));
+    Assert.That(EwpProfiler.FindLatestMatchingSourceCatalog(root, new[] { lines[0], "changed" }), Is.Null);
   }
 
   [Test]
