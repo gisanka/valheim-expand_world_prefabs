@@ -47,10 +47,11 @@ internal static class EwpProfiler
   private const int MaxSlowRoots = 120;
   private const int MaxRootSpans = 128;
   private static int DroppedSlowRoots;
+  private static long SlowRootCandidates;
   private static long LastUpdateStart;
   private static long LastGcSecond;
   private static int PreviousGc0, PreviousGc1, PreviousGc2;
-  [ThreadStatic] private static List<RootSpan>? RootScratch;
+  [ThreadStatic] private static RootTraceBuffer? RootScratch;
   private static readonly List<SlowEvent> Slow = new();
   // Connection lifecycle markers are kept only for the current capture segment.
   private static readonly List<PlayerMarker> PlayerMarkers = new();
@@ -104,7 +105,8 @@ internal static class EwpProfiler
   internal static bool SpawnActive => Running && SpawnProfiling != null && SpawnProfiling.Value;
   internal static bool ShouldProfileRuleDetails(string key) =>
     RuleDetailFilter != null && !string.IsNullOrWhiteSpace(RuleDetailFilter.Value) &&
-    key.IndexOf(RuleDetailFilter.Value.Trim(), StringComparison.OrdinalIgnoreCase) >= 0;
+    (RuleDetailFilter.Value.Trim() == "*" ||
+      key.IndexOf(RuleDetailFilter.Value.Trim(), StringComparison.OrdinalIgnoreCase) >= 0);
   internal static Scope BeginRuleDetail(Rule rule, string step) =>
     Running && rule.ProfileDetails ? Begin("rule-detail", step, rule.ProfilerKey) : default;
 
@@ -178,24 +180,41 @@ internal static class EwpProfiler
   internal static void Initialize(ConfigFile config)
   {
     const string section = "EWP Profiler";
-    Enable = config.Bind(section, "EnableProfiler", false, "Enable automatic captures and optional continuous rotation. Manual start works regardless.");
+    Enable = config.Bind(section, "EnableProfiler", true, "Enable automatic captures and optional continuous rotation. Manual start works regardless.");
     OnJoin = config.Bind(section, "CaptureOnPlayerJoin", true, "Start a gameplay capture when none is running; end startup phase at first join. While continuously profiling, all joins are marked without restarting the ongoing segment.");
     OnStartup = config.Bind(section, "CaptureOnServerStart", true, "Separate server startup capture; starts in plugin Awake on a headless dedicated server, or at first server detection.");
     StartupDuration = config.Bind(section, "CaptureStartupSeconds", 180, "Maximum startup capture duration; an earlier player join ends this phase if join capture is enabled.");
     Duration = config.Bind(section, "CaptureSeconds", 180, "Gameplay/continuous report interval in seconds. With continuous profiling disabled, capture ends after this interval.");
     Continuous = config.Bind(section, "EnableContinuousProfiling", true, "While EnableProfiler is true, rotate reports every CaptureSeconds and continue profiling until shutdown; startup remains a separate phase.");
     OnWorldSave = config.Bind(section, "ReportOnWorldSave", true, "Also rotate and write a report after ZNet.SaveWorld initiates a world save; writing is deferred to EWP LateUpdate.");
-    Detailed = config.Bind(section, "EnableDetailedEvents", false, "Include more individual trace events (threshold / 4); slow calls over SlowCallThresholdMs are ALWAYS recorded in a bounded list.");
+    Detailed = config.Bind(section, "EnableDetailedEvents", true, "Include more individual trace events (threshold / 4); slow calls over SlowCallThresholdMs are ALWAYS recorded in a bounded list.");
     SlowMs = config.Bind(section, "SlowCallThresholdMs", 25f, "Minimum inclusive wall-clock duration of a detailed event.");
     TopN = config.Bind(section, "TopN", 30, "Number of rows shown in text summary; TSVs contain all aggregated groups.");
     Searches = config.Bind(section, "EnableZdoSearchProfiling", true, "Count ZDO visits and filter passes in GetNearby/HasNearby/HasNotNearby/GetCounts.");
     Chains = config.Bind(section, "EnableCallChainProfiling", true, "Carry transient trace context across deferred pokes.");
-    Allocations = config.Bind(section, "EnableAllocationDiagnostics", false, "Sample global GC counts and approximate heap size at capture boundaries only; NOT per-rule allocation attribution.");
+    Allocations = config.Bind(section, "EnableAllocationDiagnostics", true, "Sample global GC counts and approximate heap size at capture boundaries only; NOT per-rule allocation attribution.");
     SpawnProfiling = config.Bind(section, "EnableSpawnProfiling", true, "Track EWP script-created ZDOs with source rule, trace ID and creation phases.");
-    AllSpawnEvents = config.Bind(section, "RecordAllSpawnEvents", false, "Record individual events for all EWP spawns instead of only failed attempts. All EWP spawns are always aggregated.");
-    RuleDetailFilter = config.Bind(section, "RuleDetailFilter", "", "Case-insensitive substring of RuleIdentity for selective condition, saved-key and action-stage timings. Empty disables additional rule scopes. Applies on YAML rebuild.");
-    CaptureSlowRootTrees = config.Bind(section, "CaptureSlowRootTrees", false, "Temporarily buffer up to 128 child spans per root and retain up to 120 roots exceeding SlowRootThresholdMs per segment. Diagnostic mode only.");
-    SlowRootThreshold = config.Bind(section, "SlowRootThresholdMs", 50f, "Minimum inclusive root milliseconds for a bounded synchronous span tree.");
+    AllSpawnEvents = config.Bind(section, "RecordAllSpawnEvents", true, "Record individual events for all EWP spawns instead of only failed attempts. All EWP spawns are always aggregated.");
+    RuleDetailFilter = config.Bind(section, "RuleDetailFilter", "*", "Use * for every rule (internal diagnostic default), a case-insensitive RuleIdentity substring for selected rules, or empty to disable detail scopes. Applies on YAML rebuild.");
+    CaptureSlowRootTrees = config.Bind(section, "CaptureSlowRootTrees", true, "Temporarily buffer up to 128 child spans per root and retain up to 120 roots exceeding SlowRootThresholdMs per segment. Diagnostic mode only.");
+    SlowRootThreshold = config.Bind(section, "SlowRootThresholdMs", 100f, "Minimum inclusive root milliseconds for a bounded synchronous span tree.");
+    // Existing BepInEx config files retain OLD values even when the Bind
+    // defaults above change. Upgrade once on this internal diagnostic branch
+    // so an installation with 1.13/1.14 settings runs fully instrumented
+    // without any manual config edits. Subsequent user edits are respected.
+    var migrated = config.Bind(section, "InternalDiagnosticDefaultsV115", false,
+      "One-time migration of profiler defaults for the private runtime-analysis branch.");
+    if (!migrated.Value)
+    {
+      Enable.Value = true;
+      Detailed.Value = true;
+      Allocations.Value = true;
+      AllSpawnEvents.Value = true;
+      RuleDetailFilter.Value = "*";
+      CaptureSlowRootTrees.Value = true;
+      SlowRootThreshold.Value = 100f;
+      migrated.Value = true;
+    }
   }
 
   private static int InitialGc0, InitialGc1, InitialGc2;
@@ -276,7 +295,7 @@ internal static class EwpProfiler
     {
       if (Running) return false;
       Stats.Clear(); DirectStats.Clear(); SearchStats.Clear(); ChainStats.Clear(); Seconds.Clear(); Slow.Clear(); PlayerMarkers.Clear();
-      RuntimeSeconds.Clear(); SlowRoots.Clear(); DroppedSlowRoots = 0;
+      RuntimeSeconds.Clear(); SlowRoots.Clear(); DroppedSlowRoots = 0; SlowRootCandidates = 0;
       Markers.Clear(); DroppedMarkers = 0;
       LastUpdateStart = 0; LastGcSecond = -1;
       PreviousGc0 = GC.CollectionCount(0); PreviousGc1 = GC.CollectionCount(1); PreviousGc2 = GC.CollectionCount(2);
@@ -411,23 +430,122 @@ internal static class EwpProfiler
     internal string Rule = "";
     internal long Trace;
     internal long Span;
-    internal long ParentSpan;
+    internal long ParentSpan; // Existing causal parent for exported traces/slow events.
+    internal long CallParentSpan; // Actual currently enclosing scope for slow-root trees.
     internal string Origin = "";
     internal long Started;
     internal int Generation;
     internal long ChildTicks;
     internal bool Root;
-    internal List<RootSpan>? RootSpans;
+    internal RootTraceBuffer? RootSpans;
+  }
+
+  // A bounded, ancestry-preserving buffer: once full, newly completed costly
+  // scopes can replace cheaper LEAVES, never an ancestor of a retained scope.
+  // Provisional ancestors are filled in when their own scope completes.
+  // Keeping at most MaxRootSpans rows avoids recording millions of events.
+  internal sealed class RootTraceBuffer
+  {
+    private readonly List<RootSpan> Children = new(MaxRootSpans);
+    // Reuse scratch containers on every child completion: capture is enabled
+    // by default on this private branch, so avoid millions of small allocations.
+    private readonly List<RootSpan> Additions = new(8);
+    private readonly List<RootSpan> Candidates = new(MaxRootSpans + 8);
+    private readonly HashSet<long> Required = new();
+    private readonly HashSet<long> ParentIds = new();
+    internal long Observed { get; private set; }
+    internal int Omitted => (int)Math.Max(0, Observed - Children.Count);
+    internal RootSpan[] Snapshot() => Children.ToArray();
+    internal void Clear()
+    {
+      Children.Clear(); Additions.Clear(); Candidates.Clear();
+      Required.Clear(); ParentIds.Clear(); Observed = 0;
+    }
+
+    private static bool Contains(List<RootSpan> list, long id)
+    {
+      for (int i = 0; i < list.Count; i++)
+        if (list[i].Id == id) return true;
+      return false;
+    }
+
+    internal void Complete(Frame frame, long elapsed, long exclusive, long captureStart)
+    {
+      Observed++;
+      var completed = new RootSpan(frame.Span, frame.CallParentSpan, frame.ParentSpan,
+        frame.Started - captureStart, frame.Kind, frame.Name, frame.Rule, elapsed, exclusive);
+      var known = -1;
+      for (int i = 0; i < Children.Count; i++)
+        if (Children[i].Id == frame.Span) { known = i; break; }
+      if (known >= 0)
+      {
+        // This node was previously retained as an ancestor of a hot child.
+        Children[known] = completed;
+        return;
+      }
+
+      // Include active ancestors as provisional structural breadcrumbs.
+      // A retained child can never point to an omitted parent in the TSV.
+      Additions.Clear();
+      for (var ancestor = frame.Parent; ancestor != null && !ancestor.Root; ancestor = ancestor.Parent)
+      {
+        if (Contains(Children, ancestor.Span)) continue;
+        Additions.Add(new RootSpan(ancestor.Span, ancestor.CallParentSpan, ancestor.ParentSpan,
+          ancestor.Started - captureStart, ancestor.Kind, ancestor.Name, ancestor.Rule, 0, 0));
+      }
+      Additions.Add(completed);
+      if (Additions.Count > MaxRootSpans) return;
+      if (Children.Count + Additions.Count <= MaxRootSpans)
+      {
+        Children.AddRange(Additions);
+        return;
+      }
+
+      // Reject clearly cheaper newcomers without allocating or rebuilding.
+      if (Children.Count == MaxRootSpans)
+      {
+        bool canCompete = false;
+        foreach (var row in Children)
+          if (row.Inclusive <= completed.Inclusive) { canCompete = true; break; }
+        if (!canCompete) return;
+      }
+
+      Candidates.Clear();
+      Candidates.AddRange(Children);
+      Candidates.AddRange(Additions);
+      Required.Clear();
+      foreach (var row in Additions) Required.Add(row.Id);
+      while (Candidates.Count > MaxRootSpans)
+      {
+        ParentIds.Clear();
+        foreach (var row in Candidates) ParentIds.Add(row.Parent);
+        int victim = -1;
+        long lowest = long.MaxValue;
+        for (int i = 0; i < Candidates.Count; i++)
+        {
+          var row = Candidates[i];
+          if (Required.Contains(row.Id) || ParentIds.Contains(row.Id)) continue;
+          if (row.Inclusive >= lowest) continue;
+          lowest = row.Inclusive;
+          victim = i;
+        }
+        // Protect retained ancestry and reject cheaper incoming branches.
+        if (victim < 0 || completed.Inclusive <= lowest) return;
+        Candidates.RemoveAt(victim);
+      }
+      Children.Clear();
+      Children.AddRange(Candidates);
+    }
   }
 
   // Reused per thread; no allocation per root after its first recorded scope.
-  private static List<RootSpan>? PrepareRootSpans(Frame? parent)
+  private static RootTraceBuffer? PrepareRootSpans(Frame? parent)
   {
     if (parent != null) return parent.RootSpans;
     if (CaptureSlowRootTrees == null || !CaptureSlowRootTrees.Value) return null;
-    var spans = RootScratch ??= new List<RootSpan>(MaxRootSpans);
-    spans.Clear();
-    return spans;
+    var buffer = RootScratch ??= new RootTraceBuffer();
+    buffer.Clear();
+    return buffer;
   }
 
   internal readonly struct Scope : IDisposable
@@ -469,6 +587,7 @@ internal static class EwpProfiler
     var f = new Frame {
       Parent = parent, Kind = kind, Name = name, Rule = rule.Length > 0 ? rule : parent?.Rule ?? "",
       Trace = trace, Span = id, ParentSpan = parent?.Span ?? 0,
+      CallParentSpan = parent?.Span ?? 0,
       Origin = origin, Started = Stopwatch.GetTimestamp(), Root = parent == null,
       Generation = CaptureGeneration, RootSpans = PrepareRootSpans(parent)
     };
@@ -501,6 +620,7 @@ internal static class EwpProfiler
       Span = id, Generation = CaptureGeneration,
       Trace = Chains.Value ? (linked ? token.Trace : id) : 0,
       ParentSpan = linked ? token.ParentSpan : (parent?.Span ?? 0),
+      CallParentSpan = parent?.Span ?? 0,
       Origin = linked ? token.Origin : "", RootSpans = PrepareRootSpans(parent)
     };
     Current = f;
@@ -707,18 +827,35 @@ internal static class EwpProfiler
         t.RootTicks += elapsed; t.RootCalls++;
         if (elapsed > t.MaxTicks) t.MaxTicks = elapsed;
       }
-      // Keep child spans only while their root is running; retain them only for slow roots.
+      // The buffer retains inexpensive ancestors of expensive work as well as
+      // later, heavier child spans. Original causal ancestry is not overwritten.
       if (f.RootSpans != null)
       {
-        if (!f.Root && f.RootSpans.Count < MaxRootSpans)
-          f.RootSpans.Add(new RootSpan(f.Span, f.ParentSpan, f.Started - CaptureStart,
-            f.Kind, f.Name, f.Rule, elapsed, exclusive));
-        if (f.Root && elapsed >= MsToTicks(SlowRootThreshold.Value))
+        if (!f.Root)
+          f.RootSpans.Complete(f, elapsed, exclusive, CaptureStart);
+        else if (elapsed >= MsToTicks(SlowRootThreshold.Value))
         {
-          if (SlowRoots.Count < MaxSlowRoots)
-            SlowRoots.Add(new SlowRootTrace(f.Span, f.Started - CaptureStart, f.Kind, f.Name,
-              f.Rule, elapsed, exclusive, f.RootSpans.Count == MaxRootSpans, f.RootSpans.ToArray()));
-          else DroppedSlowRoots++;
+          SlowRootCandidates++;
+          var replaceAt = SlowRoots.Count;
+          if (SlowRoots.Count == MaxSlowRoots)
+          {
+            // Keep the slowest 120 roots and count every non-retained
+            // candidate, regardless of which row ultimately gets replaced.
+            DroppedSlowRoots++;
+            replaceAt = 0;
+            for (int i = 1; i < SlowRoots.Count; i++)
+              if (SlowRoots[i].Inclusive < SlowRoots[replaceAt].Inclusive) replaceAt = i;
+            if (elapsed <= SlowRoots[replaceAt].Inclusive) replaceAt = -1;
+          }
+          // Only materialize the bounded child-array for retained candidates.
+          if (replaceAt >= 0)
+          {
+            var recorded = new SlowRootTrace(f.Span, f.ParentSpan, f.Started - CaptureStart,
+              f.Kind, f.Name, f.Rule, elapsed, exclusive, f.RootSpans.Observed,
+              f.RootSpans.Omitted, f.RootSpans.Snapshot());
+            if (replaceAt == SlowRoots.Count) SlowRoots.Add(recorded);
+            else SlowRoots[replaceAt] = recorded;
+          }
         }
       }
       if (elapsed >= MsToTicks(Detailed.Value ? SlowMs.Value / 4d : SlowMs.Value))
@@ -809,11 +946,12 @@ internal static class EwpProfiler
       Uid = uid; Source = source; Rule = rule; Origin = origin; Trace = trace; Span = span;
       Parent = parent; Delay = delay; TriggerRules = triggerRules; Position = position; Revision = revision; Owner = owner; }
   }
-  internal readonly struct RootSpan(long id, long parent, long started, string kind,
-    string name, string rule, long inclusive, long exclusive)
+  internal readonly struct RootSpan(long id, long parent, long causalParent, long started,
+    string kind, string name, string rule, long inclusive, long exclusive)
   {
     internal long Id { get; } = id;
     internal long Parent { get; } = parent;
+    internal long CausalParent { get; } = causalParent;
     internal long Started { get; } = started;
     internal string Kind { get; } = kind;
     internal string Name { get; } = name;
@@ -821,17 +959,21 @@ internal static class EwpProfiler
     internal long Inclusive { get; } = inclusive;
     internal long Exclusive { get; } = exclusive;
   }
-  private sealed class SlowRootTrace(long id, long started, string kind, string name,
-    string rule, long inclusive, long exclusive, bool truncated, RootSpan[] children)
+  private sealed class SlowRootTrace(long id, long causalParent, long started, string kind,
+    string name, string rule, long inclusive, long exclusive, long observed,
+    int omitted, RootSpan[] children)
   {
     internal long Id { get; } = id;
+    internal long CausalParent { get; } = causalParent;
     internal long Started { get; } = started;
     internal string Kind { get; } = kind;
     internal string Name { get; } = name;
     internal string Rule { get; } = rule;
     internal long Inclusive { get; } = inclusive;
     internal long Exclusive { get; } = exclusive;
-    internal bool Truncated { get; } = truncated;
+    internal long Observed { get; } = observed;
+    internal int Omitted { get; } = omitted;
+    internal bool Truncated => Omitted > 0;
     internal RootSpan[] Children { get; } = children;
   }
   private readonly struct ProfilerMarker(DateTime utc, long elapsedTicks, string label)
@@ -1005,7 +1147,7 @@ internal static class EwpProfiler
     var searches = SearchStats.ToArray();
     var chains = ChainStats.Values.ToArray();
     var lines = new List<string> {
-      "EWP internal profiler 1.14 — instrumented wall-clock, NOT actual thread CPU time",
+      "EWP internal profiler 1.15 — instrumented wall-clock, NOT actual thread CPU time",
       "EWP source version: " + EWP.VERSION,
       "DevAssistant export interface: contract=1, capabilities=1, thread-safe session epoch (role compatibility protocol 176 not asserted)",
       "UTC start: " + StartUtc.ToString("O", Invariant),
@@ -1029,7 +1171,12 @@ internal static class EwpProfiler
         "; total written UTF-8 bytes=" + SavedDataTotalBytes,
       "Trace chains: " + chains.Length + "; dropped chain-record attempts: " + DroppedChains,
       "Slow events retained: " + Slow.Count + "; dropped: " + DroppedSlow,
-      "Slow roots retained: " + SlowRoots.Count + "; dropped by segment limit: " + DroppedSlowRoots +
+      "Slow-root recording enabled: " + (CaptureSlowRootTrees?.Value ?? false) +
+        "; threshold ms: " + Num(SlowRootThreshold?.Value ?? 100f),
+      "Slow roots qualifying: " + SlowRootCandidates + "; retained slowest: " + SlowRoots.Count +
+        "; not retained by top-" + MaxSlowRoots + " limit: " + DroppedSlowRoots +
+        "; truncated retained roots: " + SlowRoots.Count(r => r.Truncated) +
+        "; omitted child spans in retained roots: " + SlowRoots.Sum(r => (long)r.Omitted) +
         "; max child spans per root: " + MaxRootSpans,
       "Manual marks retained: " + Markers.Count + "; dropped: " + DroppedMarkers,
       "Spawn groups: " + SpawnStats.Count + "; retained individual events: " + SpawnEvents.Count + "; dropped: " + DroppedSpawnEvents + "; profiler errors: " + SpawnProfilerErrors,
@@ -1131,17 +1278,20 @@ internal static class EwpProfiler
     foreach (var e in Slow.OrderByDescending(x => x.Total))
       slowRows.Add(Num(e.At / (double)Stopwatch.Frequency) + "\t" + Clean(e.Kind) + "\t" + Clean(e.Name) + "\t" + Clean(e.Rule) + "\t" + e.Trace + "\t" + e.Span + "\t" + e.Parent + "\t" + Num(Ms(e.Total)) + "\t" + Num(Ms(e.Exclusive)));
     Write("ProfilerSlowEvents.tsv", slowRows);
-    var roots = new List<string> { "RootSpanID\tSpanID\tParentSpanID\tStartSeconds\tKind\tIdentity\tRuleContext\tInclusiveMs\tExclusiveMs\tTruncated" };
-    foreach (var root in SlowRoots)
+    var roots = new List<string> { "RootSpanID\tSpanID\tParentSpanID\tStartSeconds\tKind\tIdentity\tRuleContext\tInclusiveMs\tExclusiveMs\tTruncated\tCausalParentSpanID\tObservedChildSpans\tOmittedChildSpans" };
+    foreach (var root in SlowRoots.OrderByDescending(x => x.Inclusive))
     {
       roots.Add(root.Id + "\t" + root.Id + "\t0\t" + Num(root.Started / (double)Stopwatch.Frequency) +
         "\t" + Clean(root.Kind) + "\t" + Clean(root.Name) + "\t" + Clean(root.Rule) +
-        "\t" + Num(Ms(root.Inclusive)) + "\t" + Num(Ms(root.Exclusive)) + "\t" + (root.Truncated ? "1" : "0"));
+        "\t" + Num(Ms(root.Inclusive)) + "\t" + Num(Ms(root.Exclusive)) + "\t" +
+        (root.Truncated ? "1" : "0") + "\t" + root.CausalParent + "\t" +
+        root.Observed + "\t" + root.Omitted);
       foreach (var child in root.Children.OrderBy(x => x.Started))
         roots.Add(root.Id + "\t" + child.Id + "\t" + child.Parent + "\t" +
           Num(child.Started / (double)Stopwatch.Frequency) + "\t" + Clean(child.Kind) + "\t" +
           Clean(child.Name) + "\t" + Clean(child.Rule) + "\t" +
-          Num(Ms(child.Inclusive)) + "\t" + Num(Ms(child.Exclusive)) + "\t0");
+          Num(Ms(child.Inclusive)) + "\t" + Num(Ms(child.Exclusive)) +
+          "\t0\t" + child.CausalParent + "\t\t");
     }
     Write("ProfilerSlowRoots.tsv", roots);
     var runtimeRows = new List<string> { "SecondSinceStart\tUpdates\tEwpLateUpdateTotalMs\tEwpLateUpdateAverageMs\tEwpLateUpdateMaxMs\tEwpLateUpdateP95BucketLowerMs\tEwpLateUpdateP99BucketLowerMs\tMaxUpdateStartIntervalMs\tGC0Delta\tGC1Delta\tGC2Delta\tConnectedPeers\tPokeQueueDepth\tPokeDispatches\tRestoredPokeDispatches\tPokeLatenessMaxMs\tPokeLatenessP95BucketLowerMs" };

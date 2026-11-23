@@ -229,20 +229,46 @@ reports idle and cooldown calls, attempts, successful writes, database keys
 and UTF-8 output size. These counters are not a claim that every invocation
 performed disk I/O.
 
-For selected rules, `RuleDetailFilter` accepts a case-insensitive substring
-of the existing `RuleIdentity`. Matching is precomputed on YAML rebuild.
-Only these rules gain `rule-detail` scopes for condition, saved/banned-key
-tests, chance, queued exec and commands, and local data-read. It is disabled
-unless a filter is specified; the existing rule identity and columns stay
-unchanged. Enabling a filter requires a YAML rebuild/restart to take effect.
+In this private diagnostic branch, `RuleDetailFilter = *` is the default
+and enables `rule-detail` scopes for **all rules**, including condition,
+saved/banned-key tests, chance, queued exec/commands and local data-read.
+The filter is precomputed on YAML rebuild. Set a case-insensitive substring
+of `RuleIdentity` to limit work, or empty to disable. Changing the filter
+requires a YAML rebuild/restart. Existing rule identities and metrics columns
+remain unchanged.
 
-`ProfilerSlowRoots.tsv` retains up to 120 root calls above
-`SlowRootThresholdMs` if `CaptureSlowRootTrees` is explicitly enabled.
-Per-thread scratch storage buffers at most 128 completed child scopes per
-root; traces do not represent uninstrumented work or causal follow-ups
-executed in later ticks. The report marks buffers that reached capacity.
-The mode is disabled by default to avoid per-scope overhead in routine
-captures.
+`ProfilerSlowRoots.tsv` is **enabled by default** on this internal branch,
+with `SlowRootThresholdMs = 100`. A bounded per-thread buffer keeps up to
+128 instrumented child spans per root. If the root is longer than the
+threshold, the buffer is exported; otherwise it is reused. Once full,
+later expensive child spans may replace cheaper leaf spans, while required
+synchronous ancestors remain in the tree. Exactly 128 observed spans is
+not a truncation. The TSV now separates the actual synchronous
+`ParentSpanID` from the deferred `CausalParentSpanID`; previous
+`ProfilerSlowEvents.tsv` ancestry and existing causal accounting are
+unchanged.
+
+A segment keeps the **120 slowest roots**, not the first 120.
+`ProfilerSummary.txt` reports recording enabled/disabled, threshold,
+qualified roots, retained roots, excluded roots, retained truncated roots,
+and omitted child spans in retained roots. The root rows add
+`ObservedChildSpans` and `OmittedChildSpans`; `Truncated` means
+at least one instrumented child span was not retained. Child rows retain
+their real call-parent IDs. Slow-root data covers only instrumented work
+within a synchronous root; deferred follow-up work in later ticks
+remains a distinct root.
+
+The private branch also defaults to `EnableProfiler = true`,
+`EnableDetailedEvents = true`, `EnableAllocationDiagnostics = true`,
+and `RecordAllSpawnEvents = true`. A **one-time config migration**
+updates old persisted values on first use of 1.15, so existing
+`CaptureSlowRootTrees = false` configurations are also activated.
+After this first migration, explicit user changes are respected.
+Slow-event and spawn-event outputs remain capped; their drop counts
+may rise in long or busy segments.
+These defaults can increase CPU cost, allocation pressure and log size;
+compare with reduced-diagnostics runs before using measured timings
+to conclude that a gameplay path is expensive.
 
 `ProfilerRuntime.tsv` reports per-second EWP `LateUpdate` wall time
 (sum/average/max and histogram bucket P95/P99), maximum interval between

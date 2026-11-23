@@ -224,6 +224,124 @@ public class ProfilerPhaseTests
   }
 
   [Test]
+  public void PrivateProfilerDefaults_StartWithSlowRootsAndAllRuleDetailsEnabled()
+  {
+    static ConfigEntry<T> Field<T>(string name) => (ConfigEntry<T>)typeof(EwpProfiler)
+      .GetField(name, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    Assert.That(Field<bool>("Enable").Value, Is.True);
+    Assert.That(Field<bool>("Detailed").Value, Is.True);
+    Assert.That(Field<bool>("Allocations").Value, Is.True);
+    Assert.That(Field<bool>("AllSpawnEvents").Value, Is.True);
+    Assert.That(Field<bool>("CaptureSlowRootTrees").Value, Is.True);
+    Assert.That(Field<float>("SlowRootThreshold").Value, Is.EqualTo(100f));
+    Assert.That(Field<string>("RuleDetailFilter").Value, Is.EqualTo("*"));
+    Assert.That(EwpProfiler.ShouldProfileRuleDetails("config/a.yaml#entry=42"), Is.True);
+  }
+
+  [Test]
+  public void ExistingProfilerConfigIsMigratedOnceWithoutOverwritingLaterEdits()
+  {
+    var cfg = new ConfigFile(Path.Combine(directory, "legacy-profiler.cfg"), false);
+    cfg.Bind("EWP Profiler", "EnableProfiler", false).Value = false;
+    cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", false).Value = false;
+    cfg.Bind("EWP Profiler", "RuleDetailFilter", "").Value = "";
+    EwpProfiler.Initialize(cfg);
+    Assert.That(cfg.Bind("EWP Profiler", "EnableProfiler", false).Value, Is.True);
+    Assert.That(cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", false).Value, Is.True);
+    Assert.That(cfg.Bind("EWP Profiler", "RuleDetailFilter", "").Value, Is.EqualTo("*"));
+    Assert.That(cfg.Bind("EWP Profiler", "InternalDiagnosticDefaultsV115", false).Value, Is.True);
+
+    cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", true).Value = false;
+    cfg.Bind("EWP Profiler", "RuleDetailFilter", "*").Value = "source#entry=42";
+    EwpProfiler.Initialize(cfg);
+    Assert.That(cfg.Bind("EWP Profiler", "CaptureSlowRootTrees", true).Value, Is.False);
+    Assert.That(cfg.Bind("EWP Profiler", "RuleDetailFilter", "*").Value, Is.EqualTo("source#entry=42"));
+  }
+
+  [Test]
+  public void SlowRootBufferKeepsLateHeavyBranchAndAllItsAncestors()
+  {
+    var root = new EwpProfiler.Frame { Span = 1, Root = true };
+    var buffer = new EwpProfiler.RootTraceBuffer();
+    for (var id = 2; id < 130; id++)
+    {
+      var item = new EwpProfiler.Frame { Span = id, Parent = root,
+        ParentSpan = 1, CallParentSpan = 1, Started = 0, Kind = "search", Name = "cheap" };
+      buffer.Complete(item, 5, 5, 0);
+    }
+    Assert.That(buffer.Snapshot(), Has.Length.EqualTo(128));
+    Assert.That(buffer.Observed, Is.EqualTo(128));
+    Assert.That(buffer.Omitted, Is.Zero, "Exactly 128 spans is not truncated.");
+
+    var parent = new EwpProfiler.Frame { Span = 1000, Parent = root, ParentSpan = 1,
+      CallParentSpan = 1, Started = 0, Kind = "resolve", Name = "heavy-parent" };
+    var child = new EwpProfiler.Frame { Span = 1001, Parent = parent, ParentSpan = 7777,
+      CallParentSpan = 1000, Started = 0, Kind = "search", Name = "heavy-child" };
+    buffer.Complete(child, 50000, 50000, 0);
+    buffer.Complete(parent, 70000, 20000, 0);
+
+    var retained = buffer.Snapshot();
+    Assert.That(retained, Has.Length.EqualTo(128));
+    Assert.That(buffer.Observed, Is.EqualTo(130));
+    Assert.That(buffer.Omitted, Is.EqualTo(2));
+    var heavy = retained.Single(s => s.Id == 1001);
+    Assert.That(heavy.Parent, Is.EqualTo(1000));
+    Assert.That(heavy.CausalParent, Is.EqualTo(7777));
+    Assert.That(retained.Any(s => s.Id == 1000), Is.True,
+      "A retained child must never lose its synchronous parent.");
+  }
+
+  [Test]
+  public void DeferredPokeRetainsCausalParentWithoutBreakingSynchronousTree()
+  {
+    var threshold = (ConfigEntry<float>)typeof(EwpProfiler)
+      .GetField("SlowRootThreshold", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    threshold.Value = 0f;
+    Start("deferred-tree");
+    EwpProfiler.TraceToken token;
+    using (EwpProfiler.Begin("rule", "origin", "origin"))
+      token = EwpProfiler.CaptureTrace();
+    using (EwpProfiler.Begin("tick", "pokes"))
+    {
+      using (EwpProfiler.BeginDeferred(token, "resolveReady"))
+      {
+        using (EwpProfiler.Begin("search", "chest-query")) { }
+      }
+    }
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var rows = File.ReadAllLines(Path.Combine(directory, "deferred-tree", "ProfilerSlowRoots.tsv"))
+      .Skip(1).Select(r => r.Split('\t')).ToArray();
+    var tick = rows.Single(row => row[4] == "tick" && row[5] == "pokes");
+    var poke = rows.Single(row => row[4] == "deferred-poke" && row[5] == "resolveReady");
+    Assert.That(poke[2], Is.EqualTo(tick[1]), "Physical call parent must be the active poke tick.");
+    Assert.That(poke[10], Is.EqualTo(token.ParentSpan.ToString(CultureInfo.InvariantCulture)));
+    Assert.That(poke[10], Is.Not.EqualTo(poke[2]), "Deferred causal parent belongs to an earlier rule.");
+    var search = rows.Single(row => row[4] == "search" && row[5] == "chest-query");
+    Assert.That(search[2], Is.EqualTo(poke[1]));
+  }
+
+  [Test]
+  public void SlowRootLimitKeepsTheSlowestLaterRootAndReportsLosses()
+  {
+    var threshold = (ConfigEntry<float>)typeof(EwpProfiler)
+      .GetField("SlowRootThreshold", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+    threshold.Value = 0f;
+    Start("top-roots");
+    for (var i = 0; i < 120; i++)
+      using (EwpProfiler.Begin("event", "small-" + i)) { }
+    using (EwpProfiler.Begin("event", "expensive-final"))
+      System.Threading.Thread.Sleep(20);
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var rows = File.ReadAllLines(Path.Combine(directory, "top-roots", "ProfilerSlowRoots.tsv"));
+    Assert.That(rows, Has.Length.EqualTo(121));
+    Assert.That(rows.Any(row => row.Contains("expensive-final")), Is.True);
+    var summary = File.ReadAllText(Path.Combine(directory, "top-roots", "ProfilerSummary.txt"));
+    Assert.That(summary, Does.Contain(
+      "Slow roots qualifying: 121; retained slowest: 120; not retained by top-120 limit: 1"));
+    Assert.That(summary, Does.Contain("truncated retained roots: 0"));
+  }
+
+  [Test]
   public void TargetedRuleScopes_AreAttributedWithoutTouchingUnselectedRules()
   {
     Start("target-rule");
