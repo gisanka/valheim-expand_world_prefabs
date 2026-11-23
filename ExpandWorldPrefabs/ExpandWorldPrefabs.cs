@@ -8,12 +8,14 @@ using Service;
 using UnityEngine;
 namespace ExpandWorld.Prefab;
 
-[BepInPlugin(GUID, NAME, VERSION)]
+[BepInPlugin(GUID, NAME, PROFILER_VERSION)]
 public class EWP : BaseUnityPlugin
 {
   public const string GUID = "expand_world_prefabs";
-  public const string NAME = "Expand World Prefabs";
-  public const string VERSION = "1.67";
+  public const string VERSION = "1.67"; // Upstream source version.
+  public const string PROFILER_VERSION = "1.16"; // Internal diagnostic branch.
+  // BepInEx appends its metadata version to the displayed plugin name.
+  public const string NAME = "Expand World Prefabs " + VERSION + " - Profiler";
 #nullable disable
   public static Harmony Harmony;
 #nullable enable
@@ -171,7 +173,7 @@ internal static class EwpWorldSaveReportTrigger
   static bool Prepare()
   {
     var exists = AccessTools.Method(typeof(ZNet), "SaveWorld") != null;
-    if (!exists) Log.Warning("EWP Profiler: ZNet.SaveWorld is unavailable; world-save reports disabled (interval reports still work).");
+    if (!exists) Log.Warning("Profiler: SaveWorld hook unavailable; interval reports continue.");
     return exists;
   }
 

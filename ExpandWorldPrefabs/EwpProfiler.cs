@@ -94,6 +94,7 @@ internal static class EwpProfiler
   private static long CaptureStop;
   private static DateTime StartUtc;
   private static string StartReason = "";
+  private static string BatchId = "";
   private static string OutputDirectory = "";
   private static int DroppedChains;
   private static int DroppedSlow;
@@ -297,8 +298,15 @@ internal static class EwpProfiler
 
   private static bool IsStartupCapture => StartReason.StartsWith("startup-", StringComparison.Ordinal);
 
+  // Batch IDs use Europe/Berlin civil time and match the timestamp prefix of
+  // the full report directory. Keep paths in report metadata, not console spam.
+  internal static string FormatBatchLog(string action, string captureType, string batchId, string? endReason = null) =>
+    "Profiler " + action + ": " + captureType + " #" + batchId +
+    (endReason == null ? "" : " (" + endReason + ")");
+
   internal static bool Start(string reason)
   {
+    string batch;
     lock (Sync)
     {
       if (Running) return false;
@@ -323,6 +331,8 @@ internal static class EwpProfiler
       // The host can be configured for UTC; archive names should use German
       // civil time for straightforward comparison with local modpack logs.
       var stamp = GermanTime(StartUtc).ToString("yyyyMMdd_HHmmss_fff", Invariant);
+      BatchId = stamp;
+      batch = stamp;
       OutputDirectory = Path.Combine(FileLoading.BaseDirectory, "logs", "EwpProfiler", stamp + "_" + reason);
       CaptureStart = Stopwatch.GetTimestamp();
       var seconds = IsStartupCapture ? StartupDuration.Value : Duration.Value;
@@ -335,8 +345,7 @@ internal static class EwpProfiler
       }
       Running = true;
     }
-    Log.Info("EWP Profiler started: " + reason + ", segment up to " +
-      Math.Max(1, IsStartupCapture ? StartupDuration.Value : Duration.Value) + " s; reports: " + OutputDirectory);
+    Log.Info(FormatBatchLog("started", reason, batch));
     return true;
   }
 
@@ -385,7 +394,7 @@ internal static class EwpProfiler
 
   internal static bool Stop(string reason)
   {
-    string path;
+    string path, batch, captureType;
     bool written = false;
     lock (Sync)
     {
@@ -399,10 +408,19 @@ internal static class EwpProfiler
         FinalHeap = GC.GetTotalMemory(false);
       }
       path = OutputDirectory;
+      batch = BatchId;
+      captureType = StartReason;
       try { WriteReports(path); written = true; }
-      catch (Exception e) { Log.Warning("EWP Profiler report FAILED at " + path + ": " + e); }
+      catch (Exception e)
+      {
+        // Keep the diagnostic exception type and message, but avoid repeating
+        // the lengthy, already-known absolute output directory on the console.
+        var message = (e.Message ?? "").Replace(path, "<batch>");
+        Log.Warning(FormatBatchLog("FAILED", captureType, batch, reason) +
+          ": " + e.GetType().Name + ": " + message);
+      }
     }
-    if (written) Log.Info("EWP Profiler report written (" + reason + "): " + path);
+    if (written) Log.Info(FormatBatchLog("saved", captureType, batch, reason));
     return written;
   }
 

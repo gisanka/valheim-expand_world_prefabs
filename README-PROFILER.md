@@ -40,19 +40,23 @@ Config section `[EWP Profiler]` in the standard EWP BepInEx config (exact key sp
 
 | Key | Default | Behavior |
 |---|---:|---|
-| `EnableProfiler` | `false` | Enables automatic server-start and first-join capture. Manually starting by console is allowed regardless of this value. |
+| `EnableProfiler` | `true` | Enables automatic server-start and first-join capture. Manually starting by console is allowed regardless of this value. |
 | `CaptureOnPlayerJoin` | `true` | End the startup capture on the first join; if profiling is inactive, a join starts a capture. All joins are recorded as markers while an active capture continues. |
 | `CaptureOnServerStart` | `true` | Start an independent startup phase in headless plugin Awake, otherwise on first server tick. |
 | `CaptureStartupSeconds` | `180` | Startup-phase maximum duration; ends early if first player joins during this phase. |
 | `CaptureSeconds` | `180` | Segment length: automatic report and continuation when continuous profiling is enabled; otherwise automatic stop. |
 | `EnableContinuousProfiling` | `true` | Keep profiling after startup and gameplay segments; create a fresh segment after each report until server shutdown. Requires `EnableProfiler=true`. |
 | `ReportOnWorldSave` | `true` | Flush the current segment when `ZNet.SaveWorld` initiates a server world save, deferring report I/O until the next `EWP.LateUpdate`. |
-| `EnableDetailedEvents` | `false` | Retain extra individual trace events at threshold / 4; threshold-qualified slow calls are always recorded even when this is false. |
+| `EnableDetailedEvents` | `true` | Retain extra individual trace events at threshold / 4; threshold-qualified slow calls are always recorded even when this is false. |
 | `SlowCallThresholdMs` | `25` | Slow-event inclusive wall-clock threshold. |
 | `TopN` | `30` | Summary rows (TSV files retain every aggregate group). |
 | `EnableZdoSearchProfiling` | `true` | Count search candidates/matches and time calls. |
 | `EnableCallChainProfiling` | `true` | Group linked synchronous/deferred calls by trace ID. |
-| `EnableAllocationDiagnostics` | `false` | Sample **global** GC counts/heap size at capture start/stop only. |
+| `EnableAllocationDiagnostics` | `true` | Sample **global** GC counts/heap size at capture start/stop only. |
+| `RecordAllSpawnEvents` | `true` | Record individual EWP-created spawn events within the configured retention limit. |
+| `RuleDetailFilter` | `*` | Time all instrumented per-rule phases; use substring to target particular rules. |
+| `CaptureSlowRootTrees` | `true` | Preserve bounded synchronized slow-root hierarchy for long calls. |
+| `SlowRootThresholdMs` | `100` | Minimum time for retaining a slow root. |
 
 Commands (run on server where Terminal commands are available):
 
@@ -168,7 +172,7 @@ Reports are **rotating segments**, not a cumulative lifetime log: each segment b
 
 The `ZNet.SaveWorld` postfix runs after the synchronous save initiation, not necessarily after Valheim's asynchronous writer completes. It only sets an atomic flag. EWP checks it at the start of a subsequent `LateUpdate` and writes the nine report files there. This separates profiling I/O from Valheim's save code, but writing multiple MB of TSV files can still briefly occupy the Unity main thread; run on a test server and monitor spikes. The 180-second rotation ensures progress reports even if the save hook is absent or no world save happens.
 
-A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Logs include the **full path** in `EWP Profiler started:` and `EWP Profiler report written:`; check `BepInEx/LogOutput.log` (or host console). A failed write logs `EWP Profiler report FAILED`. If the server uses UTC (as in DatHost), the summaries show server-local UTC and an explicit German local time field.
+A shutdown `ZNet.Shutdown` prefix flushes the last incomplete segment before queues are cleared. `EWP.OnDestroy` is an additional fallback, not a guarantee against crashes or hard process termination. Console output is intentionally short, e.g. `Profiler started: continuous-gameplay #20261123_044100_484` and `Profiler saved: continuous-gameplay #20261123_044100_484 (interval)`. The batch identifier is the Europe/Berlin timestamp prefix of the full report directory, which remains in `ProfilerSummary.txt`. Write failures use the same batch identifier and include the exception type and message without repeating the absolute output directory. BepInEx displays `Loading [Expand World Prefabs 1.67 - Profiler 1.16]` on this private branch; because BepInEx appends the registered plugin version, that metadata version is `1.16`, while the `EWP.VERSION` source constant remains `1.67`. Other mods specifying a minimum BepInEx dependency version for this plugin may be affected. If the server uses UTC (as in DatHost), the summaries show server-local UTC and an explicit German local time field.
 
 `ewp_profiler_snapshot` is available to force a report without stopping continuous measurement. `ewp_profiler_stop` ends the current segment; when `CaptureOnPlayerJoin=true`, any later real join may start a new segment if none is running. This does not change active continuous segments.
 

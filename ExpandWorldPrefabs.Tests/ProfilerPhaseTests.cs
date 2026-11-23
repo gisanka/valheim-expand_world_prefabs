@@ -46,6 +46,31 @@ public class ProfilerPhaseTests
   }
 
   [Test]
+  public void BatchMessagesOnlyContainTypeAndTimestampIdentifier()
+  {
+    const string batch = "20261123_044100_484";
+    Assert.That(EwpProfiler.FormatBatchLog("started", "continuous-gameplay", batch),
+      Is.EqualTo("Profiler started: continuous-gameplay #20261123_044100_484"));
+    Assert.That(EwpProfiler.FormatBatchLog("saved", "continuous-gameplay", batch, "interval"),
+      Is.EqualTo("Profiler saved: continuous-gameplay #20261123_044100_484 (interval)"));
+    Assert.That(EwpProfiler.FormatBatchLog("FAILED", "startup-headless-awake", batch, "world-save"),
+      Is.EqualTo("Profiler FAILED: startup-headless-awake #20261123_044100_484 (world-save)"));
+    Assert.That(EwpProfiler.FormatBatchLog("started", "continuous-gameplay", batch),
+      Does.Not.Contain("/"));
+  }
+
+  [Test]
+  public void PluginMetadataShowsUpstreamAndProfilerVersionsInLoader()
+  {
+    var metadata = typeof(EWP).GetCustomAttribute<BepInEx.BepInPlugin>();
+    Assert.That(metadata, Is.Not.Null);
+    Assert.That(metadata!.Name + " " + metadata.Version,
+      Is.EqualTo("Expand World Prefabs 1.67 - Profiler 1.16"));
+    Assert.That(EWP.VERSION, Is.EqualTo("1.67"));
+    Assert.That(EWP.PROFILER_VERSION, Is.EqualTo("1.16"));
+  }
+
+  [Test]
   public void PhaseReport_AgreesWithWholeCaptureTotals_WithoutCountingNestedScopesTwice()
   {
     Start("first");
