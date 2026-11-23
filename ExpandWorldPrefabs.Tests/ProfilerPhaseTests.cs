@@ -62,7 +62,7 @@ public class ProfilerPhaseTests
   [Test]
   public void PluginMetadataKeepsUpstreamVersionAndProfilerHasIndependentVersion()
   {
-    var metadata = typeof(EWP).GetCustomAttribute<BepInEx.BepInPlugin>();
+    var metadata = typeof(EWP).GetCustomAttribute<BepInEx.BepInPlugin>(inherit: false);
     Assert.That(metadata, Is.Not.Null);
     Assert.That(metadata!.Name + " " + metadata.Version,
       Is.EqualTo("Expand World Prefabs 1.67"));
