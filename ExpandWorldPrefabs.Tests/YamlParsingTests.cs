@@ -65,7 +65,8 @@ public class YamlParsingTests
     {
       Log.Init(source);
       const string yaml = "- name: check\n  value: okay\n  unknownProperty: ignored\n";
-      Assert.That(Yaml.ParseMixed("fallback-check.yaml", yaml, out var entries, out var error), Is.True, error);
+      Assert.That(Yaml.ParseMixed("fallback-check.yaml", yaml, false, out var entries, out var error, out var cacheable), Is.True, error);
+      Assert.That(cacheable, Is.False, "A tolerant parse must not be persisted.");
       Assert.That(entries.DataEntries, Has.Count.EqualTo(1));
       Assert.That(listener.Errors.Any(message => message.Contains("fallback-check.yaml")), Is.True,
         "A successful tolerant parse must still report the strict parser error.");

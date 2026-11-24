@@ -65,6 +65,7 @@ internal static class StartupProfiler
     internal readonly int Thread = ThreadingId();
     internal readonly int[] Gc = GcCounts();
     internal readonly long Heap = GC.GetTotalMemory(false);
+    internal readonly Dictionary<string, long> Counters = new();
     internal readonly List<Frame> Stack = new(32);
     internal readonly Dictionary<(Target, string), Totals> Stats = new();
     internal readonly Dictionary<(string, string), Totals> Files = new();
@@ -78,6 +79,15 @@ internal static class StartupProfiler
   {
     internal readonly Session? Session = session;
     internal readonly int Depth = depth;
+  }
+
+  internal static bool Collecting => Current is { } s && s.Thread == ThreadingId();
+
+  internal static void Count(string name, long value = 1)
+  {
+    if (Current is not { } s || s.Thread != ThreadingId()) return;
+    s.Counters.TryGetValue(name, out var previous);
+    s.Counters[name] = previous + value;
   }
 
   private static int ThreadingId() => Thread.CurrentThread.ManagedThreadId;
@@ -117,9 +127,10 @@ internal static class StartupProfiler
     Add(EwpAssembly, "EWP", "File discovery", "Service.YamlChangeDetector", "ListFiles", 0);
     Add(EwpAssembly, "EWP", "File read and hash", "Service.YamlChangeDetector", "TryRead", 4, nameof(FilePrefix));
     Add(EwpAssembly, "EWP", "Parse and cache files", "Service.FileLoading", "StoreChanges", 2);
-    Add(EwpAssembly, "EWP", "Mixed YAML parsing", "Service.Yaml", "ParseMixed", 4, nameof(FilePrefix));
     Add(EwpAssembly, "EWP", "Mixed YAML splitting", "Service.Yaml", "SplitMixed", 1);
     Add(EwpAssembly, "EWP", "YAML shorthand normalization", "Service.Yaml", "PreParse", 1);
+    Add(EwpAssembly, "EWP", "Streaming YAML attempt", "Service.Yaml", "TryDeserializeNormalized", 2);
+    Add(EwpAssembly, "EWP", "Mixed YAML parsing", "Service.Yaml", "ParseMixed", 6, nameof(FilePrefix));
     Add(EwpAssembly, "EWP", "Apply parsed cache", "Service.YamlFileCache", "Apply", 2);
     Add(EwpAssembly, "EWP", "Data loading", "Data.DataLoading", "LoadFromFiles", 2);
     Add(EwpAssembly, "EWP", "Data rebuild", "Data.DataLoading", "RebuildFromCache", 2);
@@ -435,6 +446,8 @@ internal static class StartupProfiler
         }
       }
       File.WriteAllLines(Path.Combine(path, "StartupMethods.tsv"), rows);
+      File.WriteAllLines(Path.Combine(path, "StartupCounters.tsv"), new[] { "Counter\tValue" }.Concat(
+        s.Counters.OrderBy(p => p.Key).Select(p => p.Key + "\t" + p.Value.ToString(Invariant))));
       var files = new List<string> { "Stage\tFile\tCalls\tInclusiveMs\tExclusiveMs\tMaxMs\tExceptions" };
       foreach (var pair in s.Files.OrderByDescending(p => p.Value.Inclusive))
       {
@@ -450,9 +463,10 @@ internal static class StartupProfiler
       File.WriteAllLines(Path.Combine(path, "StartupCoverage.tsv"), new[] { "Module\tMethod\tPatchStatus" }.Concat(Coverage));
       var summary = new List<string>
       {
-        "Startup loading profiler 1.1", "UTC start: " + s.Utc.ToString("O", Invariant), "Side: " + side,
+        "Startup loading profiler 1.2", "UTC start: " + s.Utc.ToString("O", Invariant), "Side: " + side,
         "EWP assembly: " + EwpAssembly.FullName + " / " + EwpAssembly.ManifestModule.ModuleVersionId,
         "EWD assembly: " + (EwdAssembly == null ? "not found" : EwdAssembly.FullName + " / " + EwdAssembly.ManifestModule.ModuleVersionId),
+        "Streaming YAML normalization: " + Config.StreamingYaml,
         "End: " + reason, "Zone completed: " + s.Zone, "Dungeon completed: " + s.Dungeon,
         "Zone completion ms: " + (s.Zone ? F(s.ZoneAt) : "not observed"),
         "Dungeon completion ms: " + (s.Dungeon ? F(s.DungeonAt) : "not observed"),
@@ -460,6 +474,8 @@ internal static class StartupProfiler
         "Outside measured roots ms: " + F(Math.Max(0, elapsed - s.RootTicks)),
         "Exclusive EWP ms: " + F(s.Stats.Where(p => p.Key.Item2 == "EWP").Sum(p => p.Value.Exclusive)),
         "Exclusive EWD ms: " + F(s.Stats.Where(p => p.Key.Item2 == "EWD").Sum(p => p.Value.Exclusive)),
+        "Streaming parser ms (inside streaming attempt, normally inside deserialization; parser + event normalization, not additive): " +
+          F(s.Counters.TryGetValue("Streaming parser inclusive ticks", out var parserTicks) ? parserTicks : 0),
         "GC collections (process-wide, by generation): " + string.Join(", ", gc.Select((n, i) => (n - s.Gc[i]).ToString(Invariant))),
         "Managed heap bytes (process-wide, approximate): " + s.Heap + " -> " + heap,
         "Accounting errors: " + s.AccountingErrors + "; open scopes: " + s.Stack.Count + "; dropped file calls: " + s.DroppedFileCalls + "; dropped root timeline rows: " + s.DroppedRoots,

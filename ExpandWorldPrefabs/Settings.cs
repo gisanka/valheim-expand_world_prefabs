@@ -22,6 +22,8 @@ public class Config
   private static ConfigEntry<bool> ConfigAllowModConfigWrite;
 #nullable enable
   internal static ConfigFile? Main;
+  private static ConfigEntry<bool>? ConfigStreamingYaml;
+  internal static bool StreamingYaml => ConfigStreamingYaml?.Value == true;
   public static bool AllowModConfigWrite => ConfigAllowModConfigWrite.Value;
   public static bool AutomaticReload => ConfigAutomaticReload.Value;
   public static int ReloadQuietSeconds => ConfigReloadQuietSeconds.Value;
@@ -45,6 +47,7 @@ public class Config
   public static void Init(ConfigFile config)
   {
     Main = config;
+    ConfigStreamingYaml = config.Bind("Performance", "Streaming YAML normalization", false, "Experimental: normalize script YAML directly in the parser. Applies on full reload or when a YAML file changes.");
     ConfigAllowModConfigWrite = config.Bind("General", "Allow modifying mod configs", false, "When enabled, scripts can change settings of other mods with <savemodconfig_X>.");
     ConfigAutomaticReload = config.Bind("General", "Automatic file reload", true, "Settings are automatically reloaded on file changes. Requires restart to take effect.");
     ConfigReloadQuietSeconds = config.Bind("General", "Automatic reload quiet seconds", 1,
