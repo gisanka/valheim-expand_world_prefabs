@@ -126,7 +126,15 @@ internal static class StartupProfiler
     Add(EwpAssembly, "EWP", "File discovery and hashing", "Service.YamlChangeDetector", "TakeAll", 0);
     Add(EwpAssembly, "EWP", "File discovery", "Service.YamlChangeDetector", "ListFiles", 0);
     Add(EwpAssembly, "EWP", "File read and hash", "Service.YamlChangeDetector", "TryRead", 4, nameof(FilePrefix));
-    Add(EwpAssembly, "EWP", "Parse and cache files", "Service.FileLoading", "StoreChanges", 2);
+    Add(EwpAssembly, "EWP", "YAML content fingerprint", "Service.YamlChangeDetector", "Fingerprint", 1);
+    Add(EwpAssembly, "EWP", "Persistent cache lookup", "Service.PersistentYamlCache", "TryLoad", 2);
+    Add(EwpAssembly, "EWP", "Persistent cache read and validation", "Service.PersistentYamlCache", "ReadPayload", 4);
+    Add(EwpAssembly, "EWP", "Persistent cache creation", "Service.PersistentYamlCache", "Store", 2);
+    Add(EwpAssembly, "EWP", "Persistent cache write", "Service.PersistentYamlCache", "WritePayload", 4);
+    Add(EwpAssembly, "EWP", "Persistent cache cleanup", "Service.PersistentYamlCache", "Prune", 1);
+    Add(EwpAssembly, "EWP", "Binary DTO serialization", "Service.YamlDtoBinary", "Encode", 1);
+    Add(EwpAssembly, "EWP", "Binary DTO deserialization", "Service.YamlDtoBinary", "Decode", 1);
+    Add(EwpAssembly, "EWP", "Parse and cache files", "Service.FileLoading", "StoreChanges", 4);
     Add(EwpAssembly, "EWP", "Mixed YAML splitting", "Service.Yaml", "SplitMixed", 1);
     Add(EwpAssembly, "EWP", "YAML shorthand normalization", "Service.Yaml", "PreParse", 1);
     Add(EwpAssembly, "EWP", "Streaming YAML attempt", "Service.Yaml", "TryDeserializeNormalized", 2);
@@ -463,10 +471,10 @@ internal static class StartupProfiler
       File.WriteAllLines(Path.Combine(path, "StartupCoverage.tsv"), new[] { "Module\tMethod\tPatchStatus" }.Concat(Coverage));
       var summary = new List<string>
       {
-        "Startup loading profiler 1.2", "UTC start: " + s.Utc.ToString("O", Invariant), "Side: " + side,
+        "Startup loading profiler 1.3", "UTC start: " + s.Utc.ToString("O", Invariant), "Side: " + side,
         "EWP assembly: " + EwpAssembly.FullName + " / " + EwpAssembly.ManifestModule.ModuleVersionId,
         "EWD assembly: " + (EwdAssembly == null ? "not found" : EwdAssembly.FullName + " / " + EwdAssembly.ManifestModule.ModuleVersionId),
-        "Streaming YAML normalization: " + Config.StreamingYaml,
+        "Persistent YAML cache: " + Config.PersistentYaml, "Streaming YAML normalization: " + Config.StreamingYaml,
         "End: " + reason, "Zone completed: " + s.Zone, "Dungeon completed: " + s.Dungeon,
         "Zone completion ms: " + (s.Zone ? F(s.ZoneAt) : "not observed"),
         "Dungeon completion ms: " + (s.Dungeon ? F(s.DungeonAt) : "not observed"),

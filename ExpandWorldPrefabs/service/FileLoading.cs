@@ -116,6 +116,7 @@ public static class FileLoading
     Cache.Clear();
     var changes = Changes.TakeAll();
     StoreChanges(changes, false);
+    if (ExpandWorld.Prefab.Config.PersistentYaml) CreatePersistentCache(ExpandWorld.Prefab.Config.StreamingYaml).Prune(changes.Files);
     Rebuild(changes.Files, true);
   }
 
@@ -145,21 +146,52 @@ public static class FileLoading
     }
   }
 
+  private static PersistentYamlCache CreatePersistentCache(bool streaming) => new(
+    Path.Combine(Paths.ConfigPath, "expand_world_yaml_cache"), streaming);
+
   // Invalid YAML never replaces a previously valid entry. Returns how many cache entries changed.
   internal static (int Modified, bool Prefabs) StoreChanges(YamlChanges changes, bool backup)
   {
+    bool streaming = ExpandWorld.Prefab.Config.StreamingYaml;
+    return StoreChanges(changes, backup, ExpandWorld.Prefab.Config.PersistentYaml ? CreatePersistentCache(streaming) : null, streaming);
+  }
+
+  internal static (int Modified, bool Prefabs) StoreChanges(YamlChanges changes, bool backup, PersistentYamlCache? persistent, bool streaming)
+  {
     var modified = 0;
     var prefabs = false;
+    // This detector count is not proof of a valid parsed entry: failed parses
+    // can also have an acknowledged hash in the existing reload pipeline.
+    ExpandWorld.Prefab.StartupProfiler.Count("Unchanged file hashes (detector)", changes.Unchanged);
+    ExpandWorld.Prefab.StartupProfiler.Count("Changed YAML files", changes.Changed.Count);
+    ExpandWorld.Prefab.StartupProfiler.Count("Failed YAML reads", changes.Failed.Count);
+    ExpandWorld.Prefab.StartupProfiler.Count("Listed YAML files", changes.Files.Count);
+    if (ExpandWorld.Prefab.StartupProfiler.Collecting)
+    {
+      var changedOrFailed = new HashSet<string>(changes.Changed.Select(f => f.Path), StringComparer.OrdinalIgnoreCase);
+      changedOrFailed.UnionWith(changes.Failed.Select(f => f.Path));
+      ExpandWorld.Prefab.StartupProfiler.Count("Retained in-memory entries (no detected change)",
+        changes.Files.Count(path => !changedOrFailed.Contains(path) && Cache.Contains(path)));
+    }
     foreach (var failed in changes.Failed)
       Log.Warning($"YAML reload skipped '{DisplayPath(failed.Path)}': {failed.Error}. Previous valid entries remain active (if any).");
     foreach (var file in changes.Changed)
     {
-      if (!Yaml.ParseMixed(file.Path, file.Content, out var entries, out var error))
+      Yaml.MixedFileEntries entries;
+      if (persistent == null || !persistent.TryLoad(file, out entries))
       {
-        Log.Warning($"YAML reload skipped '{DisplayPath(file.Path)}': {error}. Previous valid entries remain active (if any).");
-        continue;
+        if (!Yaml.ParseMixed(file.Path, file.Content, streaming, out entries, out var error, out var cacheable))
+        {
+          Log.Warning($"YAML reload skipped '{DisplayPath(file.Path)}': {error}. Previous valid entries remain active (if any).");
+          continue;
+        }
+        entries.ContentHash = file.Hash; // Hash of precisely the text snapshot that parsed successfully.
+        if (persistent != null)
+        {
+          if (cacheable) persistent.Store(file, entries);
+          else ExpandWorld.Prefab.StartupProfiler.Count("Persistent cache skipped: parser fallback");
+        }
       }
-      entries.ContentHash = file.Hash; // Hash of precisely the text snapshot that parsed successfully.
       Cache.Store(file.Path, entries);
       modified++;
       prefabs |= IsPrefabPath(file.Path);

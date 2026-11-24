@@ -234,8 +234,7 @@ public sealed class YamlChangeDetector(Func<YamlChanges, bool> onFlush, Func<dou
     try
     {
       content = File.ReadAllText(path);
-      using var sha = SHA256.Create();
-      hash = Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(content)));
+      hash = Fingerprint(content);
       return true;
     }
     catch (Exception ex)
@@ -243,5 +242,13 @@ public sealed class YamlChangeDetector(Func<YamlChanges, bool> onFlush, Func<dou
       error = $"{ex.GetType().Name}: {ex.Message}";
       return false;
     }
+  }
+
+  private static string Fingerprint(string content)
+  {
+    var bytes = Encoding.UTF8.GetBytes(content);
+    ExpandWorld.Prefab.StartupProfiler.Count("YAML bytes (UTF-8 snapshot)", bytes.Length);
+    using var sha = SHA256.Create();
+    return Convert.ToBase64String(sha.ComputeHash(bytes));
   }
 }

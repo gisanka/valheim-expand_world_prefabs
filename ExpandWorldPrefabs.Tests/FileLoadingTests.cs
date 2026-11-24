@@ -116,4 +116,25 @@ public class FileLoadingTests
     Assert.That(backup, Has.Length.EqualTo(1));
     Assert.That(File.ReadAllText(backup[0]), Is.EqualTo("- name: a\n  value: b\n"));
   }
+
+  [Test]
+  public void PersistentHitAndInvalidAutomaticReloadKeepProvenance()
+  {
+    var directory = Path.Combine(FileLoading.BackupDirectory, "persistent-" + Guid.NewGuid().ToString("N"));
+    var disk = new PersistentYamlCache(directory, false);
+    var path = Path.Combine(FileLoading.BaseDirectory, "expand_prefabs_disk.yaml");
+    var file = PersistentYamlCacheTests.Snapshot(path, "- name: data\n  value: example\n- prefab: Player\n  type: create\n");
+    var changes = new YamlChanges(); changes.Changed.Add(file);
+    Assert.That(FileLoading.StoreChanges(changes, false, disk, false).Modified, Is.EqualTo(1));
+    Assert.That(disk.TryLoad(file, out var expected), Is.True);
+    cache.Clear();
+    Assert.That(FileLoading.StoreChanges(changes, false, disk, false).Modified, Is.EqualTo(1));
+    var entriesField = typeof(YamlFileCache).GetField("files", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    var stored = (System.Collections.Generic.Dictionary<string, Yaml.MixedFileEntries>)entriesField.GetValue(cache)!;
+    var before = stored[path];
+    DtoAssert.Equal(expected, before);
+    var invalid = new YamlChanges(); invalid.Changed.Add(PersistentYamlCacheTests.Snapshot(path, "- prefab: [broken"));
+    Assert.That(FileLoading.StoreChanges(invalid, false, disk, false).Modified, Is.Zero);
+    Assert.That(stored[path], Is.SameAs(before));
+  }
 }
