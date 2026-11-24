@@ -27,6 +27,7 @@ public class EWP : BaseUnityPlugin
     PokeTimers.Initialize();
     Harmony = new(GUID);
     Harmony.PatchAll();
+    StartupProfiler.Initialize();
     Log.Init(Logger);
     FileLoading.EnsureBaseDirectory();
     RuleLog.Init(Path.Combine(FileLoading.BaseDirectory, "logs"));
@@ -46,6 +47,7 @@ public class EWP : BaseUnityPlugin
   }
   public void Start()
   {
+    StartupProfiler.AttachEwd();
     ServerDevcommands.Init();
     ExpandWorldData.Init();
     new Terminal.ConsoleCommand("ewp_reload_data", "Manually reloads the ewp_data.yaml file.", (args) =>
@@ -105,6 +107,7 @@ public class EWP : BaseUnityPlugin
   }
   public void LateUpdate()
   {
+    StartupProfiler.Tick();
     var started = EwpProfiler.Active ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
     try
     {
@@ -134,6 +137,7 @@ public class EWP : BaseUnityPlugin
   }
   public void OnDestroy()
   {
+    StartupProfiler.Dispose();
     EwpProfiler.Stop("plugin-destroy");
     FileLoading.StopWatching();
     BlueprintWatcher.Stop();
@@ -147,6 +151,7 @@ public class CleanupOnShutdown
 {
   static void Prefix()
   {
+    StartupProfiler.WorldShutdown("world-shutdown");
     EwpProfiler.Stop("server-shutdown");
   }
   static void Postfix()
@@ -185,5 +190,9 @@ internal static class EwpWorldSaveReportTrigger
 [HarmonyPatch(typeof(ZNet), nameof(ZNet.ShutdownWithoutSave))]
 internal static class ProfilerShutdownWithoutSave
 {
-  static void Prefix() { EwpProfiler.Stop("server-shutdown-without-save"); }
+  static void Prefix()
+  {
+    StartupProfiler.WorldShutdown("world-shutdown-without-save");
+    EwpProfiler.Stop("server-shutdown-without-save");
+  }
 }
