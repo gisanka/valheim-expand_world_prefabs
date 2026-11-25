@@ -49,13 +49,14 @@ internal static class StartupProfiler
     }
   }
 
-  private struct Frame(Target target, string module, long started, string? file)
+  private struct Frame(Target target, string module, long started, string? file, bool roomKey)
   {
     internal Target Target = target;
     internal string Module = module;
     internal long Started = started;
     internal long Children = 0;
     internal string? File = file;
+    internal bool RoomKey = roomKey;
   }
 
   private sealed class Session
@@ -69,16 +70,21 @@ internal static class StartupProfiler
     internal readonly List<Frame> Stack = new(32);
     internal readonly Dictionary<(Target, string), Totals> Stats = new();
     internal readonly Dictionary<(string, string), Totals> Files = new();
+    internal readonly Dictionary<(string Stage, string Name), Totals> Rooms = new();
+    internal readonly Dictionary<(string Stage, string Name, string Id, string Before, string After), long> RoomAssetStates = new();
     internal readonly List<(string Module, string Stage, long Started, long Elapsed)> Roots = new();
     internal long RootTicks, DroppedFileCalls, DroppedRoots, AccountingErrors;
     internal long ZoneAt, DungeonAt;
     internal bool Zone, Dungeon;
   }
 
-  private readonly struct Scope(Session session, int depth)
+  private readonly struct Scope(Session session, int depth, DungeonDB.RoomData? roomData = null, bool? loadedBefore = null, string? assetId = null)
   {
     internal readonly Session? Session = session;
     internal readonly int Depth = depth;
+    internal readonly DungeonDB.RoomData? RoomData = roomData;
+    internal readonly bool? LoadedBefore = loadedBefore;
+    internal readonly string? AssetId = assetId;
   }
 
   internal static bool Collecting => Current is { } s && s.Thread == ThreadingId();
@@ -191,6 +197,7 @@ internal static class StartupProfiler
       Manager(assembly, "PersistentEvents.PersistentEventManager", true, false, false);
       Add(assembly, m, "Persistent events load/apply", "ExpandWorldData.PersistentEvents.PersistentEventManager", "LoadAndApply", 2);
       Add(assembly, m, "Room conversion", "ExpandWorldData.Dungeon.RoomManager", "FromData", 2);
+      RegisterRoomStages(assembly);
       Add(assembly, m, "Location hash index", "ExpandWorldData.Locations.LocationManager", "UpdateHashes", 0);
       Add(assembly, m, "Location instances", "ExpandWorldData.Locations.LocationManager", "UpdateInstances", 0);
       Add(assembly, m, "Alternative biome apply", "ExpandWorldData.AltBiomes.AltBiomeManager", "Apply", 2);
@@ -203,6 +210,52 @@ internal static class StartupProfiler
       Log.Info("Startup profiler: EWD hooks installed (see report for coverage).");
     }
     catch (Exception ex) { Log.Warning("Startup profiler: EWD attachment incomplete: " + ex.Message); }
+  }
+
+  private static void RegisterRoomStages(Assembly assembly)
+  {
+    const string m = "EWD";
+    const string room = "ExpandWorldData.Dungeon.RoomManager";
+    const string blueprint = "ExpandWorldData.Data.BlueprintManager";
+    const string helper = "ExpandWorldData.Helper";
+    Add(assembly, m, "Room creation", room, "CreateRoomData", 2, nameof(RoomNamePrefix));
+    Add(assembly, m, "Room proxy allocation", room, "CreateRoomProxy", 1, nameof(RoomNamePrefix));
+    Add(assembly, m, "Room connection allocation", room, "CreateConnection", 2);
+    Add(assembly, m, "Room base population", room, "PopulateBaseRoom", 5, nameof(RoomNamePrefix));
+    Add(assembly, m, "Room asset load", helper, "LoadRoomAsset", 1, nameof(RoomAssetPrefix));
+    Add(assembly, m, "Room asset read", helper, "ReadRoomAsset", 1, nameof(RoomAssetPrefix));
+    Add(assembly, m, "Room asset release", helper, "ReleaseRoomAsset", 1, nameof(RoomAssetPrefix));
+    Add(assembly, m, "Room base component", room, "ReadBaseRoom", 2, nameof(RoomNamePrefix));
+    Add(assembly, m, "Room base connection discovery", room, "ReadBaseConnections", 2, nameof(RoomNamePrefix));
+    Add(assembly, m, "Room native connection copying", room, "CopyBaseConnections", 3);
+    Add(assembly, m, "Room snapshot reuse", room, "ApplyCachedConnections", 3, nameof(RoomNamePrefix));
+    Add(assembly, m, "Room blueprint connection allocation", room, "CreateBlueprintConnections", 2);
+    Add(assembly, m, "Room YAML connection overrides", room, "UpdateConnections", 2);
+    Add(assembly, m, "Room object parsing", room, "LoadRoomObjects", 3);
+    Add(assembly, m, "Room swap loading", room, "LoadRoomSwaps", 2);
+    Add(assembly, m, "Room object data loading", room, "LoadRoomData", 3);
+    Add(assembly, m, "Room vanilla export", room, "ToData", 1);
+    Add(assembly, m, "Blueprint load and dependencies", blueprint, "Load", 2, nameof(RoomNamePrefix));
+    Add(assembly, m, "Blueprint leaf reuse", blueprint, "ReuseLeaf", 1, nameof(RoomNamePrefix));
+    Add(assembly, m, "Blueprint parse", "Data.Blueprints", "GetBluePrint", 2, nameof(RoomNamePrefix));
+    Add(assembly, m, "Blueprint eviction", "Data.BlueprintCache", "Remove", 1, nameof(RoomNamePrefix));
+    Add(assembly, m, "Blueprint snap points", "Data.Blueprint", "LoadSnapPoints", 1);
+    Add(assembly, m, "Blueprint centering", "Data.Blueprint", "Center", 2);
+    var bpType = assembly.GetType("Data.Blueprint", false);
+    if (bpType != null)
+      Add(assembly, m, "Blueprint cache lookup", "Data.BlueprintCache", "TryGet", 2,
+        nameof(RoomNamePrefix), new[] { typeof(string), bpType.MakeByRefType() });
+    else Coverage.Add(m + "\tData.BlueprintCache.TryGet\tmissing Data.Blueprint type");
+
+    // These methods were verified in the actual SoftReferenceableAssets.dll.
+    // Only count calls beneath an EWD room asset scope, not unrelated game loads.
+    var assets = typeof(SoftReferenceableAssets.AssetID).Assembly;
+    Add(assets, m, "Room loader acquire", "SoftReferenceableAssets.AssetBundleLoader", "Load", 1, nameof(RoomLoaderPrefix));
+    Add(assets, m, "Room loader release", "SoftReferenceableAssets.AssetBundleLoader", "Release", 1, nameof(RoomLoaderPrefix));
+    Add(assets, m, "Room asset loader load", "SoftReferenceableAssets.AssetLoader", "Load", 0, nameof(RoomLoaderPrefix));
+    Add(assets, m, "Room asset loader unload", "SoftReferenceableAssets.AssetLoader", "Unload", 0, nameof(RoomLoaderPrefix));
+    Add(assets, m, "Room bundle loader load", "SoftReferenceableAssets.BundleLoader", "Load", 0, nameof(RoomLoaderPrefix));
+    Add(assets, m, "Room bundle loader unload", "SoftReferenceableAssets.BundleLoader", "Unload", 0, nameof(RoomLoaderPrefix));
   }
 
   private static void RegisterCommon(Assembly assembly, string module)
@@ -267,8 +320,11 @@ internal static class StartupProfiler
     {
       target = Find(assembly.GetType(type, false), method, count, signature) ?? throw new MissingMethodException(name);
       // Validate positional parameters before installing specialized hooks.
-      if (prefix == nameof(FilePrefix) && target.GetParameters()[0].ParameterType != typeof(string))
-        throw new InvalidOperationException("Expected string path argument.");
+      if ((prefix == nameof(FilePrefix) || prefix == nameof(RoomNamePrefix)) &&
+          target.GetParameters()[0].ParameterType != typeof(string))
+        throw new InvalidOperationException("Expected string key argument.");
+      if (prefix == nameof(RoomAssetPrefix) && target.GetParameters()[0].ParameterType != typeof(DungeonDB.RoomData))
+        throw new InvalidOperationException("Expected room data argument.");
       Targets.Add(target, new Target(module, stage, target));
       Patches!.Patch(target, prefix: Hook(prefix, Priority.First), finalizer: Hook(nameof(MeasureFinalizer), Priority.Last));
       Coverage.Add(module + "\t" + name + "\tinstalled");
@@ -334,6 +390,59 @@ internal static class StartupProfiler
   private static void MeasurePrefix(MethodBase __originalMethod, out Scope __state) => __state = Enter(__originalMethod, null, null);
   private static void FilePrefix(MethodBase __originalMethod, string __0, out Scope __state) => __state = Enter(__originalMethod, __0, null);
   private static void YamlPrefix(MethodBase __originalMethod, Type __1, out Scope __state) => __state = Enter(__originalMethod, null, __1);
+  private static void RoomNamePrefix(MethodBase __originalMethod, string __0, out Scope __state) =>
+    __state = Enter(__originalMethod, __0, null, true);
+
+  private static bool? Loaded(DungeonDB.RoomData room)
+  {
+    try { return room.m_prefab.IsLoaded; }
+    catch (Exception) { return null; }
+  }
+
+  private static void RoomAssetPrefix(MethodBase __originalMethod, DungeonDB.RoomData __0, out Scope __state)
+  {
+    __state = default;
+    if (!Collecting) return;
+    // Probe before starting the measured method, and after closing its scope.
+    // A failed diagnostic probe must never change the original asset operation.
+    var before = Loaded(__0);
+    string? id;
+    string name;
+    try { id = __0.m_prefab.m_assetID.ToString(); }
+    catch (Exception) { id = null; }
+    try { name = __0.m_prefab.name ?? "unknown"; }
+    catch (Exception) { name = "unknown"; }
+    var scope = Enter(__originalMethod, name, null, true);
+    if (scope.Session != null)
+      __state = new Scope(scope.Session, scope.Depth, __0, before, id);
+  }
+
+  private static void RoomLoaderPrefix(MethodBase __originalMethod, out Scope __state)
+  {
+    __state = default;
+    if (Current is not { } s || s.Thread != ThreadingId()) return;
+    // The wrappers delimit synchronous room asset operations, including backfill.
+    // Nested asset/bundle loader calls share their existing timing stack.
+    if (!s.Stack.Any(f => f.Target.Stage == "Room asset load" ||
+                          f.Target.Stage == "Room asset read" ||
+                          f.Target.Stage == "Room asset release" ||
+                          f.Target.Stage == "Room base component")) return;
+    __state = Enter(__originalMethod, null, null);
+  }
+
+  private static string LoadState(bool? value) => value.HasValue ? (value.Value ? "loaded" : "not-loaded") : "unknown";
+
+  private static void RecordRoomAssetState(Session s, Frame f, Scope scope)
+  {
+    if (scope.RoomData == null) return;
+    var before = LoadState(scope.LoadedBefore);
+    var after = LoadState(Loaded(scope.RoomData));
+    Count(f.Target.Stage + " " + before + " -> " + after);
+    var key = (f.Target.Stage, f.File ?? "", scope.AssetId ?? "unknown", before, after);
+    if (s.RoomAssetStates.TryGetValue(key, out var count)) s.RoomAssetStates[key] = count + 1;
+    else if (s.RoomAssetStates.Count < MaxFiles) s.RoomAssetStates[key] = 1;
+    else Count("Room asset state rows dropped");
+  }
 
   private static bool OwnsDto(Type type, Assembly assembly)
   {
@@ -342,7 +451,7 @@ internal static class StartupProfiler
     return type.IsGenericType && type.GetGenericArguments().Any(t => OwnsDto(t, assembly));
   }
 
-  private static Scope Enter(MethodBase method, string? file, Type? yamlType)
+  private static Scope Enter(MethodBase method, string? file, Type? yamlType, bool roomKey = false)
   {
     var s = Current;
     if (s == null || s.Thread != ThreadingId()) return default;
@@ -357,7 +466,7 @@ internal static class StartupProfiler
         var assembly = module == "EWP" ? EwpAssembly : module == "EWD" ? EwdAssembly : null;
         if (assembly == null || !OwnsDto(yamlType, assembly)) return default;
       }
-      s.Stack.Add(new Frame(target, module, Stopwatch.GetTimestamp(), file));
+      s.Stack.Add(new Frame(target, module, Stopwatch.GetTimestamp(), file, roomKey));
       return new Scope(s, s.Stack.Count);
     }
     catch (Exception ex) { AccountingFailed(s, ex.Message); return default; }
@@ -394,14 +503,17 @@ internal static class StartupProfiler
       if (f.File != null)
       {
         var fileKey = (f.Target.Stage, f.File);
-        if (s.Files.TryGetValue(fileKey, out var ft)) ft.Add(elapsed, f.Children, __exception != null);
-        else if (s.Files.Count < MaxFiles)
+        var details = f.RoomKey ? s.Rooms : s.Files;
+        if (details.TryGetValue(fileKey, out var ft)) ft.Add(elapsed, f.Children, __exception != null);
+        else if (details.Count < MaxFiles)
         {
-          s.Files[fileKey] = ft = new Totals();
+          details[fileKey] = ft = new Totals();
           ft.Add(elapsed, f.Children, __exception != null);
         }
+        else if (f.RoomKey) Count("Room detail calls dropped");
         else s.DroppedFileCalls++;
       }
+      RecordRoomAssetState(s, f, __state);
     }
     catch (Exception ex) { AccountingFailed(s, ex.Message); }
     return __exception;
@@ -464,6 +576,21 @@ internal static class StartupProfiler
           F(t.Inclusive), F(t.Exclusive), F(t.Max), t.Exceptions.ToString(Invariant)));
       }
       File.WriteAllLines(Path.Combine(path, "StartupFiles.tsv"), files);
+      var rooms = new List<string> { "Stage\tRoomOrBlueprint\tCalls\tInclusiveMs\tExclusiveMs\tMaxMs\tExceptions" };
+      foreach (var pair in s.Rooms.OrderByDescending(p => p.Value.Inclusive))
+      {
+        var t = pair.Value;
+        rooms.Add(string.Join("\t", pair.Key.Stage, Cell(pair.Key.Name), t.Calls.ToString(Invariant),
+          F(t.Inclusive), F(t.Exclusive), F(t.Max), t.Exceptions.ToString(Invariant)));
+      }
+      File.WriteAllLines(Path.Combine(path, "StartupRooms.tsv"), rooms);
+      var assets = new List<string> { "Stage\tBaseRoom\tAssetID\tBefore\tAfter\tCalls" };
+      foreach (var pair in s.RoomAssetStates.OrderBy(p => p.Key.Name).ThenBy(p => p.Key.Stage))
+      {
+        var k = pair.Key;
+        assets.Add(string.Join("\t", k.Stage, Cell(k.Name), Cell(k.Id), k.Before, k.After, pair.Value.ToString(Invariant)));
+      }
+      File.WriteAllLines(Path.Combine(path, "StartupRoomAssets.tsv"), assets);
       var timeline = new List<string> { "Module\tStage\tStartMs\tElapsedMs\tEndMs" };
       foreach (var span in s.Roots.OrderBy(r => r.Started))
         timeline.Add(string.Join("\t", span.Module, span.Stage, F(span.Started), F(span.Elapsed), F(span.Started + span.Elapsed)));
@@ -471,7 +598,7 @@ internal static class StartupProfiler
       File.WriteAllLines(Path.Combine(path, "StartupCoverage.tsv"), new[] { "Module\tMethod\tPatchStatus" }.Concat(Coverage));
       var summary = new List<string>
       {
-        "Startup loading profiler 1.3", "UTC start: " + s.Utc.ToString("O", Invariant), "Side: " + side,
+        "Startup loading profiler 1.4", "UTC start: " + s.Utc.ToString("O", Invariant), "Side: " + side,
         "EWP assembly: " + EwpAssembly.FullName + " / " + EwpAssembly.ManifestModule.ModuleVersionId,
         "EWD assembly: " + (EwdAssembly == null ? "not found" : EwdAssembly.FullName + " / " + EwdAssembly.ManifestModule.ModuleVersionId),
         "Persistent YAML cache: " + Config.PersistentYaml, "Streaming YAML normalization: " + Config.StreamingYaml,
@@ -490,6 +617,9 @@ internal static class StartupProfiler
         "Inclusive includes nested measured calls; exclusive subtracts them. Residual includes uninstrumented code, other mods and measurement overhead.",
         "Only the startup thread is measured. Zero calls means not observed, not proof that work was absent. Generic EWD read helpers are not patched; their I/O remains in parent residual.",
         "Exceptions are escaping exceptions per measured call, not a count of all parser failures. SDC/WEC have no loader hooks.",
+        "Room asset states are loader IsLoaded probes, not physical disk I/O. Underlying asset/bundle methods report calls, not guaranteed actual loads or unloads.",
+        "Room state probes run outside each measured wrapper but inside its parent. Unknown states are not counted as transitions.",
+        "StartupRooms.tsv contains room/blueprint keys; StartupRoomAssets.tsv contains base room/asset ID and observed before/after states.",
         "Report I/O is outside the capture. Timings include instrumentation overhead; heap delta is not allocated bytes.",
         "", "Top methods by exclusive wall time:"
       };
