@@ -77,8 +77,9 @@ public class PersistentYamlCacheTests
     cache.Store(file, expected);
     Assert.That(new PersistentYamlCache(directory, false).TryLoad(file, out var actual), Is.True);
     DtoAssert.Equal(expected, actual);
-    Assert.That(actual.ScriptEntries[0].data!.Name, Is.EqualTo(expected.ScriptEntries[0].data!.Name));
-    Assert.That(actual.ScriptEntries[0].data.Inline, Is.Null);
+    var actualData = actual.ScriptEntries[0].data!;
+    Assert.That(actualData.Name, Is.EqualTo(expected.ScriptEntries[0].data!.Name));
+    Assert.That(actualData.Inline, Is.Null);
     actual.ScriptEntries[0].prefab = "changed";
     Assert.That(cache.TryLoad(file, out var fresh), Is.True);
     Assert.That(fresh.ScriptEntries[0].prefab, Is.EqualTo("Player"));
@@ -139,7 +140,7 @@ public class PersistentYamlCacheTests
     var list = new List<object>(); list.Add(list);
     var entries = new Yaml.MixedFileEntries { ScriptEntries = [new RuleYaml { log = new RuleLogData(list) }] };
     Assert.Throws<InvalidDataException>(() => YamlDtoBinary.Encode(entries));
-    entries.ScriptEntries[0].log = new RuleLogData(new Version(1, 2));
+    entries.ScriptEntries[0].log = new RuleLogData(new System.Version(1, 2));
     Assert.Throws<InvalidDataException>(() => YamlDtoBinary.Encode(entries));
   }
 
