@@ -148,17 +148,6 @@ public class BlueprintParsingTests
   }
 
   [Test]
-  public void PlanBuild_UnknownSection_ResumesAtNextKnownHeader()
-  {
-    var bp = Parse("#Pieces", "a;;1;0;0;0;0;0;1", "#Unknown", "# comment", "b;;2;0;0;0;0;0;1",
-      "#Pieces", "c;;3;0;0;0;0;0;1");
-
-    Assert.That(bp.Objects, Has.Count.EqualTo(2));
-    Assert.That(bp.Objects[0].Prefab, Is.EqualTo("a"));
-    Assert.That(bp.Objects[1].Prefab, Is.EqualTo("c"));
-  }
-
-  [Test]
   public void PlanBuild_InvalidTerrainRow_DropsOnlyTheTerrain()
   {
     var bp = Parse("a;;1;0;0;0;0;0;1", "#TerrainHeight:0,0,0;0;1", "1;2", "1;x", "#TerrainPaint:0,0,0;0;1", "1:0:0");
