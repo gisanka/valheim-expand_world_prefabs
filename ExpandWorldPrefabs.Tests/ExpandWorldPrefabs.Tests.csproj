@@ -48,5 +48,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ExpandWorldPrefabs\ExpandWorldPrefabs.csproj" />
+    <ProjectReference Include="..\tools\TestAssemblyPatcher\TestAssemblyPatcher.csproj" ReferenceOutputAssembly="false" Private="false" OutputItemType="TestAssemblyPatcher" />
   </ItemGroup>
+  <!-- Run after copy-local; the production project continues to reference the unmodified game DLL. -->
+  <Target Name="PrepareValheimTestAssembly" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="'@(TestAssemblyPatcher)' == ''" Text="TestAssemblyPatcher output could not be resolved." />
+    <Exec Command="dotnet &quot;@(TestAssemblyPatcher)&quot; &quot;$(TargetDir)assembly_valheim.dll&quot;" />
+  </Target>
 </Project>
