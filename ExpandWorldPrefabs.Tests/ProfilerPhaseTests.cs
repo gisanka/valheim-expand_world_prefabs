@@ -85,8 +85,8 @@ public class ProfilerPhaseTests
     var metadata = typeof(EWP).GetCustomAttribute<BepInEx.BepInPlugin>(inherit: false);
     Assert.That(metadata, Is.Not.Null);
     Assert.That(metadata!.Name + " " + metadata.Version,
-      Is.EqualTo("Expand World Prefabs 1.67"));
-    Assert.That(EWP.VERSION, Is.EqualTo("1.67"));
+      Is.EqualTo("Expand World Prefabs 1.68"));
+    Assert.That(EWP.VERSION, Is.EqualTo("1.68"));
     Assert.That(EwpProfiler.ProfilerVersion, Is.EqualTo("1.16"));
   }
 
