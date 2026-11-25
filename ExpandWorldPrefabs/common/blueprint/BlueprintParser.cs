@@ -191,7 +191,8 @@ public partial class Blueprints
         return PlanBuildSection.Ignore;
       }
     }
-    return current;
+    // Plain comments keep the section; unknown headers must not be parsed as pieces.
+    return row.Length == 1 || char.IsWhiteSpace(row[1]) ? current : PlanBuildSection.Ignore;
   }
 
   private static BlueprintObject GetPlanBuildObject(string row, string fileName, bool loadData)
