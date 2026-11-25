@@ -147,7 +147,7 @@ public static class FileLoading
   }
 
   private static PersistentYamlCache CreatePersistentCache(bool streaming) => new(
-    Path.Combine(Paths.ConfigPath, "expand_world_yaml_cache"), streaming);
+    Path.Combine(Paths.ConfigPath, "..", "cache", "expand_world_prefabs", "yaml-v1"), streaming);
 
   // Invalid YAML never replaces a previously valid entry. Returns how many cache entries changed.
   internal static (int Modified, bool Prefabs) StoreChanges(YamlChanges changes, bool backup)
