@@ -143,8 +143,8 @@ public class BlueprintParsingTests
   {
     var bp = Parse("#Pieces", "# a comment", "a;;1;0;0;0;0;0;1", "#Unknown", "b;;2;0;0;0;0;0;1");
 
-    Assert.That(bp.Objects, Has.Count.EqualTo(1));
-    Assert.That(bp.Objects[0].Prefab, Is.EqualTo("a"));
+    Assert.That(bp.Objects, Has.Count.EqualTo(2));
+    Assert.That(bp.Objects[1].Prefab, Is.EqualTo("b"));
   }
 
   [Test]
