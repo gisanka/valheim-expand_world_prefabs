@@ -22,7 +22,10 @@ public class Commands
     {
       try
       {
-        Console.instance.TryRunCommand(cmd);
+        if (ServerDevcommands.RunCommand is { } runCommand)
+          runCommand(cmd, e => Log.Error($"Failed to run command: {cmd}\n{e.Message}"));
+        else
+          Console.instance.TryRunCommand(cmd);
       }
       catch (Exception e)
       {
