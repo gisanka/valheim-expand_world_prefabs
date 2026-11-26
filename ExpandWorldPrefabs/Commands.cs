@@ -22,7 +22,18 @@ public class Commands
     {
       try
       {
-        Console.instance.TryRunCommand(cmd);
+        if (ServerDevcommands.RunCommand is { } runCommand)
+          runCommand(cmd, e => Log.Error($"Failed to run command: {cmd}\n{e.Message}"));
+        else
+        {
+          if (!ServerDevcommands.IsInstalled)
+          {
+            var name = cmd.Split(' ')[0].ToLower();
+            if (!Terminal.commands.ContainsKey(name))
+              throw new InvalidOperationException($"Unknown command '{name}'.");
+          }
+          Console.instance.TryRunCommand(cmd);
+        }
       }
       catch (Exception e)
       {
