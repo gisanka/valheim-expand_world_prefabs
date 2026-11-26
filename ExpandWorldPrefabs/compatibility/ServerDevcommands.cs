@@ -6,6 +6,7 @@ namespace ExpandWorld.Prefab;
 
 public static class ServerDevcommands
 {
+  internal static bool IsInstalled => Chainloader.PluginInfos.ContainsKey("server_devcommands");
   internal static Action<string, Action<Exception>>? RunCommand { get; private set; }
 
   public static void Init()
