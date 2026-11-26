@@ -215,8 +215,10 @@ or client-side rendering.
 capture is running. `RecordAllSpawnEvents = false` retains individual failed
 attempts only; set it to `true` to retain individual events for every EWP-created
 spawn. Events remain buffered until normal report rotation, world save, manual
-snapshot or shutdown. No per-spawn disk logging occurs. The individual-event
-buffer holds up to 6,000 rows per segment and reports dropped events.
+snapshot or shutdown. No per-spawn disk logging occurs. The individual-event buffer holds up to 600 rows per segment and reports
+dropped events. Once full, failed creation attempts can replace ordinary
+events so that failures are not hidden by earlier successful spawns.
+Aggregate counts in `ProfilerSpawnSummary.tsv` remain complete.
 
 Output files in each segment:
 
@@ -283,14 +285,19 @@ root's inclusive time within measurement precision. `detail` rows provide
 the kind, operation identity, rule context, count, total exclusive time,
 maximum individual inclusive time and its `MaxSpanID`. Detail keys are
 bounded to 256 identities per live root; further identities contribute
-to labeled `detail-overflow` rows grouped by kind. Kind totals remain
-exact. Detail rows and kind totals are **alternative breakdowns**, not
+to labeled `detail-overflow` rows grouped by kind. To reduce report size,
+only the ten highest-exclusive-cost `detail` groups per retained root are
+exported; the rest is merged into explicit per-kind `detail-other` rows.
+`kind-total`, `root-self`, and the original `detail-overflow` groups
+are retained in full. These are the top ten among the **256 captured
+identities**, not a guarantee of the top ten of all observed child spans.
+Kind totals remain exact. Detail rows and kind totals are **alternative breakdowns**, not
 values to sum together. Inclusive totals are nonadditive because child
 scopes can be nested. Dynamic identity grouping may have more overhead
 than the fixed tree alone.
 
-`ProfilerSlowEvents.tsv` now keeps the **3,000 slowest qualifying events**
-per segment rather than the first 3,000. A bounded min-heap avoids an
+`ProfilerSlowEvents.tsv` keeps the **300 slowest qualifying events**
+per segment; the bounded min-heap still avoids an
 unbounded event list. The new `ProfilerSlowEventSummary.tsv` counts
 **all threshold-qualified slow events**, whether or not their individual
 rows survived retention. It has exact `kind-total` rows and up to 1,024
