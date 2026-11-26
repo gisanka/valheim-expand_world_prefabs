@@ -15,7 +15,7 @@ namespace ExpandWorld.Prefab;
 // All game state is read-only. Aggregate locks also cover calls from other threads.
 internal static class EwpProfiler
 {
-  internal const string ProfilerVersion = "1.16";
+  internal const string ProfilerVersion = "1.17";
   private static ConfigEntry<bool> Enable = null!;
   private static ConfigEntry<bool> OnJoin = null!;
   private static ConfigEntry<bool> OnStartup = null!;
@@ -48,6 +48,7 @@ internal static class EwpProfiler
   private const int MaxSlowRoots = 120;
   private const int MaxRootSpans = 128;
   private const int MaxRootWorkDetails = 256;
+  private const int MaxExportedRootWorkDetails = 10;
   private const int MaxSlowEventDetails = 1024;
   private static int DroppedSlowRoots;
   private static long SlowRootCandidates;
@@ -77,7 +78,7 @@ internal static class EwpProfiler
   internal static string? SourceCatalogRootOverride;
   private static readonly Dictionary<string, SpawnTotals> SpawnStats = new(StringComparer.Ordinal);
   private static readonly List<SpawnEvent> SpawnEvents = new();
-  private const int MaxSpawnEvents = 6000;
+  private const int MaxSpawnEvents = 600;
   private static int DroppedSpawnEvents;
   private static int SpawnProfilerErrors;
   // Session-local connection sequence persists across report rotation (not world state).
@@ -102,7 +103,7 @@ internal static class EwpProfiler
   private static long SavedDataIdleChecks, SavedDataCooldownChecks, SavedDataAttempts, SavedDataSuccesses;
   private static long SavedDataLastEntries, SavedDataLastBytes, SavedDataTotalBytes;
   private const int MaxChains = 50000;
-  private const int MaxSlow = 3000;
+  private const int MaxSlow = 300;
   private static volatile bool Running;
   [ThreadStatic] private static Frame? Current;
 
@@ -491,6 +492,18 @@ internal static class EwpProfiler
       Calls = Calls, Inclusive = Inclusive, Exclusive = Exclusive,
       MaxInclusive = MaxInclusive, MaxSpan = MaxSpan
     };
+    // Combine complete aggregate groups without losing the slowest span.
+    internal void Merge(ScopeCostTotals other)
+    {
+      Calls += other.Calls;
+      Inclusive += other.Inclusive;
+      Exclusive += other.Exclusive;
+      if (other.MaxInclusive > MaxInclusive)
+      {
+        MaxInclusive = other.MaxInclusive;
+        MaxSpan = other.MaxSpan;
+      }
+    }
   }
 
   internal sealed class ScopeCostRow(string level, string kind, string name,
@@ -507,6 +520,30 @@ internal static class EwpProfiler
   // scopes can replace cheaper LEAVES, never an ancestor of a retained scope.
   // Provisional ancestors are filled in when their own scope completes.
   // Keeping at most MaxRootSpans rows avoids recording millions of events.
+  // Compact only the exported rows. The exact per-kind aggregates and
+  // root-self cost are retained, while omitted detail identities are folded
+  // into explicit per-kind rest groups. This does NOT pretend to recover
+  // identities already aggregated into the live 256-key overflow.
+  internal static ScopeCostRow[] CompactRootWork(ScopeCostRow[] rows, int maxDetails)
+  {
+    var ranked = rows.Where(x => x.Level == "detail")
+      .OrderByDescending(x => x.Totals.Exclusive)
+      .ThenBy(x => x.Kind, StringComparer.Ordinal)
+      .ThenBy(x => x.Name, StringComparer.Ordinal)
+      .ThenBy(x => x.Rule, StringComparer.Ordinal).ToArray();
+    var result = rows.Where(x => x.Level != "detail")
+      .Concat(ranked.Take(Math.Max(0, maxDetails))).ToList();
+    foreach (var group in ranked.Skip(Math.Max(0, maxDetails))
+      .GroupBy(x => x.Kind, StringComparer.Ordinal))
+    {
+      var other = new ScopeCostTotals();
+      foreach (var row in group) other.Merge(row.Totals);
+      result.Add(new ScopeCostRow("detail-other", group.Key,
+        "(other detailed operations/rules)", "", other));
+    }
+    return result.ToArray();
+  }
+
   internal sealed class RootTraceBuffer
   {
     private readonly List<RootSpan> Children = new(MaxRootSpans);
@@ -767,10 +804,26 @@ internal static class EwpProfiler
         if (phase == "zdo-created") timeline.SpawnCreated++;
         if (AllSpawnEvents.Value || phase == "failed" || phase == "create-exception-outcome-unknown")
         {
-          if (SpawnEvents.Count < MaxSpawnEvents)
-            SpawnEvents.Add(new SpawnEvent(utc, at - CaptureStart, phase, prefab, prefabHash,
-              uid, sourceZdo, rule, origin, trace, span, parent, delay, triggerRules, position, revision, owner));
-          else DroppedSpawnEvents++;
+          var important = phase == "failed" || phase == "create-exception-outcome-unknown";
+          var replaceAt = -1;
+          if (SpawnEvents.Count >= MaxSpawnEvents)
+          {
+            DroppedSpawnEvents++;
+            // Preserve evidence of failed creations when a stream of successful
+            // events has already filled the bounded individual-event buffer.
+            if (important)
+              for (int i = 0; i < SpawnEvents.Count; i++)
+                if (SpawnEvents[i].Phase != "failed" &&
+                    SpawnEvents[i].Phase != "create-exception-outcome-unknown")
+                { replaceAt = i; break; }
+          }
+          if (SpawnEvents.Count < MaxSpawnEvents || replaceAt >= 0)
+          {
+            var ev = new SpawnEvent(utc, at - CaptureStart, phase, prefab, prefabHash,
+              uid, sourceZdo, rule, origin, trace, span, parent, delay, triggerRules, position, revision, owner);
+            if (replaceAt >= 0) SpawnEvents[replaceAt] = ev;
+            else SpawnEvents.Add(ev);
+          }
         }
       }
     }
@@ -1517,7 +1570,8 @@ internal static class EwpProfiler
       own.Add(root.Id, root.Inclusive, root.Exclusive);
       rootWork.Add(root.Id + "\troot-self\t" + Clean(root.Kind) + "\t" +
         Clean(root.Name) + "\t" + Clean(root.Rule) + "\t" + CostColumns(own));
-      foreach (var row in root.Work.OrderByDescending(x => x.Totals.Exclusive))
+      foreach (var row in CompactRootWork(root.Work, MaxExportedRootWorkDetails)
+        .OrderByDescending(x => x.Totals.Exclusive))
         rootWork.Add(root.Id + "\t" + row.Level + "\t" + Clean(row.Kind) +
           "\t" + Clean(row.Name) + "\t" + Clean(row.Rule) + "\t" + CostColumns(row.Totals));
     }

@@ -87,7 +87,7 @@ public class ProfilerPhaseTests
     Assert.That(metadata!.Name + " " + metadata.Version,
       Is.EqualTo("Expand World Prefabs 1.67"));
     Assert.That(EWP.VERSION, Is.EqualTo("1.67"));
-    Assert.That(EwpProfiler.ProfilerVersion, Is.EqualTo("1.16"));
+    Assert.That(EwpProfiler.ProfilerVersion, Is.EqualTo("1.17"));
   }
 
   [Test]
@@ -484,9 +484,13 @@ public class ProfilerPhaseTests
     var category = rows.Single(r => r[1] == "kind-total" && r[2] == "search");
     Assert.That(category[5], Is.EqualTo("200"),
       "All instrumented child calls count even when only 128 fit in the tree.");
-    var detailCount = rows.Where(r => r[1] == "detail" || r[1] == "detail-overflow")
+    var detailCount = rows.Where(r => r[1] == "detail" || r[1] == "detail-overflow" ||
+        r[1] == "detail-other")
       .Sum(r => long.Parse(r[5], CultureInfo.InvariantCulture));
     Assert.That(detailCount, Is.EqualTo(200));
+    Assert.That(rows.Count(r => r[1] == "detail"), Is.EqualTo(10));
+    Assert.That(rows.Single(r => r[1] == "detail-other" && r[2] == "search")[5],
+      Is.EqualTo("190"));
     var self = rows.Single(r => r[1] == "root-self");
     var categoryMs = double.Parse(category[6], CultureInfo.InvariantCulture);
     var selfMs = double.Parse(self[6], CultureInfo.InvariantCulture);
@@ -514,6 +518,18 @@ public class ProfilerPhaseTests
       .Sum(r => r.Totals.Calls), Is.EqualTo(300));
     Assert.That(buffer.DetailOverflowCalls, Is.EqualTo(44));
     Assert.That(buffer.Omitted, Is.EqualTo(172));
+
+    var compact = EwpProfiler.CompactRootWork(rows, 10);
+    Assert.That(compact.Count(r => r.Level == "detail"), Is.EqualTo(10));
+    var other = compact.Single(r => r.Level == "detail-other" && r.Kind == "search");
+    Assert.That(other.Totals.Calls, Is.EqualTo(246));
+    Assert.That(other.Totals.Exclusive, Is.EqualTo(2952));
+    Assert.That(compact.Single(r => r.Level == "detail-overflow").Totals.Calls, Is.EqualTo(44));
+    Assert.That(compact.Where(r => r.Level == "detail" || r.Level == "detail-other" ||
+        r.Level == "detail-overflow").Sum(r => r.Totals.Exclusive),
+      Is.EqualTo(compact.Single(r => r.Level == "kind-total").Totals.Exclusive));
+    Assert.That(compact.Where(r => r.Level == "detail" || r.Level == "detail-other" ||
+        r.Level == "detail-overflow").Sum(r => r.Totals.Calls), Is.EqualTo(300));
   }
 
   [Test]
@@ -523,24 +539,44 @@ public class ProfilerPhaseTests
       .GetField("SlowMs", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
     threshold.Value = 0f;
     Start("slow-event-top");
-    for (var i = 0; i < 3000; i++)
+    for (var i = 0; i < 300; i++)
       using (EwpProfiler.Begin("event", "fast-" + i)) { }
     using (EwpProfiler.Begin("event", "slow-after-limit"))
       System.Threading.Thread.Sleep(20);
     Assert.That(EwpProfiler.Stop("test-report"), Is.True);
 
     var events = File.ReadAllLines(Path.Combine(directory, "slow-event-top", "ProfilerSlowEvents.tsv"));
-    Assert.That(events, Has.Length.EqualTo(3001));
+    Assert.That(events, Has.Length.EqualTo(301));
     Assert.That(events.Any(row => row.Contains("slow-after-limit")), Is.True,
       "Late slow events must displace fast early events.");
     var summary = File.ReadAllLines(Path.Combine(directory, "slow-event-top", "ProfilerSlowEventSummary.tsv"))
       .Skip(1).Select(row => row.Split('\t')).ToArray();
     var kind = summary.Single(row => row[0] == "kind-total" && row[1] == "event");
-    Assert.That(kind[4], Is.EqualTo("3001"));
+    Assert.That(kind[4], Is.EqualTo("301"));
     Assert.That(summary.Where(row => row[0] == "detail" || row[0] == "detail-overflow")
-      .Sum(row => long.Parse(row[4], CultureInfo.InvariantCulture)), Is.EqualTo(3001));
+      .Sum(row => long.Parse(row[4], CultureInfo.InvariantCulture)), Is.EqualTo(301));
     var text = File.ReadAllText(Path.Combine(directory, "slow-event-top", "ProfilerSummary.txt"));
-    Assert.That(text, Does.Contain("Slow events retained (slowest): 3000; not retained: 1; qualifying: 3001"));
+    Assert.That(text, Does.Contain("Slow events retained (slowest): 300; not retained: 1; qualifying: 301"));
+  }
+
+  [Test]
+  public void SpawnEventsRetainFailureAfterOrdinaryEventsFillTheBuffer()
+  {
+    Start("bounded-spawns");
+    for (var i = 0; i < 600; i++)
+      EwpProfiler.RecordSpawn("created-ready", 12345, null, "", 0, false);
+    EwpProfiler.RecordSpawn("failed", 12345, null, "", 0, false);
+    Assert.That(EwpProfiler.Stop("test-report"), Is.True);
+    var dir = Path.Combine(directory, "bounded-spawns");
+    var rows = File.ReadAllLines(Path.Combine(dir, "ProfilerSpawns.tsv"));
+    Assert.That(rows, Has.Length.EqualTo(601), "The header plus exactly 600 individual events.");
+    Assert.That(rows.Any(row => row.Contains("\tfailed\t")), Is.True,
+      "A failure after the limit must replace an ordinary event.");
+    var summary = File.ReadAllText(Path.Combine(dir, "ProfilerSpawnSummary.tsv"));
+    Assert.That(summary, Does.Contain("created-ready"));
+    Assert.That(summary, Does.Contain("failed"));
+    var report = File.ReadAllText(Path.Combine(dir, "ProfilerSummary.txt"));
+    Assert.That(report, Does.Contain("retained individual events: 600; dropped: 1"));
   }
 
   [Test]
