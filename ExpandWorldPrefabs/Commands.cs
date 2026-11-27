@@ -23,7 +23,7 @@ public class Commands
       try
       {
         if (ServerDevcommands.RunCommand is { } runCommand)
-          runCommand(cmd, e => Log.Error($"Failed to run command: {cmd}\n{e.Message}"));
+          runCommand(cmd, e => Log.Error($"Failed to run command: {cmd}. Reason: {e.Message}"));
         else
         {
           if (!ServerDevcommands.IsInstalled)
@@ -37,7 +37,7 @@ public class Commands
       }
       catch (Exception e)
       {
-        Log.Error($"Failed to run command: {cmd}\n{e.Message}");
+        Log.Error($"Failed to run command: {cmd}. Reason: {e.Message}");
       }
     }
   }
